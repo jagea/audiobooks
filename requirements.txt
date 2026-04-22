@@ -7,3 +7,9 @@ piper-tts>=1.2.0
 kokoro>=0.9.4
 mobi>=0.3.3
 soundfile>=0.12.1
+langdetect>=1.0.9
+pdfplumber>=0.11.0
+
+# Optional: OCR for scanned PDFs (requires tesseract binary)
+# pytesseract>=0.3.13
+# Pillow>=10.0.0

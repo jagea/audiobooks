@@ -1,7 +1,18 @@
 """
-audiobook_app.py
+audiobook_app.py  v2.0
 Generador de Audiolibros
-Flujo: EPUB → Extraer/Limpiar TXT → Revisar → Generar MP3
+Flujo: EPUB/PDF/MOBI → Extraer/Limpiar TXT → Generar MP3 → [Exportar M4B]
+
+Mejoras v2.0:
+  · Normalización LUFS por capítulo
+  · Pausas ajustables (frase / párrafo)
+  · PDF mejorado con pdfplumber + OCR fallback
+  · Detección de idioma automática
+  · Limpieza de texto más agresiva
+  · Reproductor integrado
+  · Exportación M4B con marcas de capítulo
+  · Cola de proyectos
+  · Progreso persistente (resume)
 """
 
 import sys
@@ -10,8 +21,12 @@ import re
 import wave
 import json
 import time
+import shutil
 import subprocess
+import tempfile
 from pathlib import Path
+from dataclasses import dataclass, field
+from typing import Optional
 
 import numpy as np
 import ebooklib
@@ -23,10 +38,16 @@ from PyQt6.QtWidgets import (
     QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
     QPushButton, QLabel, QFileDialog, QSlider, QProgressBar,
     QListWidget, QListWidgetItem, QFrame, QComboBox, QSizePolicy,
-    QScrollArea, QLineEdit, QTextEdit
+    QScrollArea, QLineEdit, QTextEdit, QCheckBox, QDoubleSpinBox
 )
-from PyQt6.QtCore import Qt, QThread, pyqtSignal
+from PyQt6.QtCore import Qt, QThread, pyqtSignal, QUrl
 from PyQt6.QtGui import QIntValidator
+
+try:
+    from PyQt6.QtMultimedia import QMediaPlayer, QAudioOutput
+    HAS_MULTIMEDIA = True
+except ImportError:
+    HAS_MULTIMEDIA = False
 
 
 # ── Paleta ─────────────────────────────────────────────────────────────────────
@@ -143,6 +164,12 @@ QPushButton#danger_btn {{
     color: {ERROR}; font-size: 13px; letter-spacing: 1px;
 }}
 QPushButton#danger_btn:hover {{ background-color: {ERROR}; color: white; }}
+QPushButton#player_btn {{
+    background-color: {BG_ITEM}; border: 1px solid {BORDER};
+    border-radius: 6px; padding: 6px 12px;
+    color: {TEXT_PRIMARY}; font-size: 14px;
+}}
+QPushButton#player_btn:hover {{ border-color: {ACCENT_DARK}; color: {ACCENT}; }}
 QComboBox {{
     background-color: {BG_ITEM}; border: 1px solid {BORDER};
     border-radius: 6px; padding: 8px 12px;
@@ -194,6 +221,26 @@ QLabel#speed_val {{
 QLabel#quality_high   {{ color: {SUCCESS};   font-size: 10px; font-weight: bold; font-family: 'Courier New', monospace; }}
 QLabel#quality_medium {{ color: {WARNING};   font-size: 10px; font-weight: bold; font-family: 'Courier New', monospace; }}
 QLabel#quality_low    {{ color: {TEXT_MUTED}; font-size: 10px; font-weight: bold; font-family: 'Courier New', monospace; }}
+QCheckBox {{
+    color: {TEXT_PRIMARY}; font-size: 12px; spacing: 8px;
+}}
+QCheckBox::indicator {{
+    width: 16px; height: 16px;
+    background: {BG_ITEM}; border: 1px solid {BORDER};
+    border-radius: 3px;
+}}
+QCheckBox::indicator:checked {{
+    background: {ACCENT}; border-color: {ACCENT};
+}}
+QDoubleSpinBox {{
+    background-color: {BG_ITEM}; border: 1px solid {BORDER};
+    border-radius: 6px; padding: 6px 10px;
+    color: {TEXT_PRIMARY}; font-size: 12px;
+    font-family: 'Courier New', monospace;
+}}
+QDoubleSpinBox::up-button, QDoubleSpinBox::down-button {{
+    background: {BORDER}; width: 18px; border-radius: 3px;
+}}
 """
 
 
@@ -303,7 +350,7 @@ class PhaseCard(QFrame):
 
 
 # ══════════════════════════════════════════════════════════════════════════════
-# EXTRACTORES (EPUB / PDF / MOBI)
+# TEXT CLEANING (enhanced)
 # ══════════════════════════════════════════════════════════════════════════════
 
 def reparar_encoding(texto):
@@ -314,15 +361,10 @@ def reparar_encoding(texto):
       Cada carácter acentuado de 2 bytes UTF-8 [B1, B2] aparece como 3 chars
       donde el primer byte fue incrementado en 1 y se insertó 0xC2 en el medio.
       Ejemplo: 'ÄÂ©' (0xC4, 0xC2, 0xA9) → 'é' (bytes UTF-8: 0xC3, 0xA9)
-      Aparece en ciertos archivos MOBI con codificación incorrecta.
 
     Patrón 2 — doble codificación clásica UTF-8→Latin-1:
-      Cada byte UTF-8 fue interpretado como carácter Latin-1 (2 chars por 1).
       Ejemplo: 'Ã©' → 'é'
-
-    Si el texto ya está bien codificado se devuelve sin cambios.
     """
-    # ── Patrón 1: triplete [B1+1, Â(0xC2), B2] ──────────────────────────────
     resultado = []
     i = 0
     reparado = False
@@ -330,9 +372,9 @@ def reparar_encoding(texto):
         c0 = ord(texto[i])
         c1 = ord(texto[i + 1]) if i + 1 < len(texto) else 0
         c2 = ord(texto[i + 2]) if i + 2 < len(texto) else 0
-        if (0xC1 <= c0 <= 0xE0   # primer byte UTF-8 original + 1 (rango 0xC0-0xDF)
-                and c1 == 0xC2   # Â siempre ocupa la posición central
-                and 0x80 <= c2 <= 0xBF):  # byte de continuación UTF-8 válido
+        if (0xC1 <= c0 <= 0xE0
+                and c1 == 0xC2
+                and 0x80 <= c2 <= 0xBF):
             try:
                 decoded = bytes([c0 - 1, c2]).decode('utf-8')
                 resultado.append(decoded)
@@ -347,31 +389,77 @@ def reparar_encoding(texto):
     if reparado:
         return ''.join(resultado)
 
-    # ── Patrón 2: bytes UTF-8 leídos como Latin-1 ────────────────────────────
-    # Solo tiene éxito si TODO el texto cabe en Latin-1 Y los bytes
-    # resultantes forman UTF-8 válido, lo que garantiza que no se
-    # modifican textos ya correctamente codificados.
     try:
         return texto.encode('latin-1').decode('utf-8')
     except (UnicodeEncodeError, UnicodeDecodeError):
         return texto
 
 
+# TOC detection: lines like "Capítulo 1 ............ 23" or "Chapter 1 . . . . 5"
+_RE_TOC_LINE  = re.compile(r'^.{3,60}[.\s·\-]{4,}\s*\d{1,4}\s*$')
+# Footnote markers inline: [1], ¹²³, etc.
+_RE_FN_INLINE = re.compile(r'(\w)[¹²³⁴⁵⁶⁷⁸⁹⁰]+|(\w)\[\d+\]')
+# Standalone footnote block at start of line: "[1] Some footnote text"
+_RE_FN_BLOCK  = re.compile(r'^\s*\[\d{1,3}\]\s+.{0,250}$', re.MULTILINE)
+# Superscript footnote blocks: "¹ Some footnote text" (short line starting with superscript)
+_RE_FN_SUPER  = re.compile(r'^[¹²³⁴⁵⁶⁷⁸⁹⁰]\s+.{0,120}$', re.MULTILINE)
+# Copyright / legal boilerplate
+_RE_COPYRIGHT = re.compile(
+    r'^.*(?:isbn[\s\-]?\d|copyright|©|\(c\)\s*\d{4}|all rights reserved|'
+    r'derechos reservados|primera edici[oó]n|published by|printed in).*$',
+    re.IGNORECASE | re.MULTILINE
+)
+# URLs and emails
+_RE_URL   = re.compile(r'https?://\S+|www\.\S+')
+_RE_EMAIL = re.compile(r'\b[\w.+%-]+@[\w.-]+\.\w{2,6}\b')
+# Running headers: short all-caps or title-case line repeated often
+_RE_PAGE_NUM = re.compile(r'^\s*\d+\s*$', re.MULTILINE)
+
+
 def limpiar_texto(texto):
+    # Reparar guiones de fin de línea
     texto = re.sub(r'(\w)-\n(\w)', r'\1\2', texto)
-    texto = re.sub(r'^\s*\d+\s*$', '', texto, flags=re.MULTILINE)
-    # Remove all-caps header lines (language-agnostic: uses Python's Unicode-aware str.upper())
+
+    # Eliminar números de página solos
+    texto = _RE_PAGE_NUM.sub('', texto)
+
+    # Eliminar líneas de tabla de contenidos (puntos/guiones seguidos de número)
+    lines = texto.split('\n')
+    lines = ['' if _RE_TOC_LINE.match(l) else l for l in lines]
+    texto = '\n'.join(lines)
+
+    # Eliminar líneas de copyright / editorial
+    texto = _RE_COPYRIGHT.sub('', texto)
+
+    # Eliminar URLs y emails
+    texto = _RE_URL.sub('', texto)
+    texto = _RE_EMAIL.sub('', texto)
+
+    # Eliminar marcadores de notas al pie inline [1] o ¹
+    texto = _RE_FN_INLINE.sub(lambda m: m.group(1) or m.group(2), texto)
+
+    # Eliminar bloques de notas al pie
+    texto = _RE_FN_BLOCK.sub('', texto)
+    texto = _RE_FN_SUPER.sub('', texto)
+
+    # Eliminar cabeceras ALL-CAPS (3-40 chars, solo letras)
     lines = texto.split('\n')
     texto = '\n'.join(
         '' if (3 <= len(l.strip()) <= 40 and l.strip() and l.strip() == l.strip().upper()
                and any(c.isalpha() for c in l)) else l
         for l in lines
     )
+
+    # Unir líneas rotas dentro de párrafo
     texto = re.sub(r'(?<![.!?»\"])\n(?![\n])', ' ', texto)
+
+    # Normalizar espacios y saltos de línea
     texto = re.sub(r'\n{3,}', '\n\n', texto)
     texto = re.sub(r'  +', ' ', texto)
     texto = '\n'.join(l.strip() for l in texto.split('\n')).strip()
+
     return reparar_encoding(texto)
+
 
 def extraer_texto_html(html_content):
     soup = BeautifulSoup(html_content, 'html.parser')
@@ -384,29 +472,106 @@ def extraer_texto_html(html_content):
             partes.append(f"\n\n{texto}\n\n" if elem.name in ['h1','h2','h3','h4'] else texto)
     return '\n'.join(partes)
 
+
+# ══════════════════════════════════════════════════════════════════════════════
+# LANGUAGE DETECTION
+# ══════════════════════════════════════════════════════════════════════════════
+
+def detectar_idioma(texto: str) -> str:
+    """Returns ISO 639-1 language code, or 'en' as fallback."""
+    try:
+        from langdetect import detect
+        return detect(texto[:3000])
+    except Exception:
+        return 'en'
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# EXTRACTORS (EPUB / PDF / MOBI)
+# ══════════════════════════════════════════════════════════════════════════════
+
 def fragmentos_epub(path):
-    """Devuelve lista de textos limpios, uno por sección del EPUB."""
-    libro = epub.read_epub(path)
+    libro    = epub.read_epub(path)
     spine_ids = [iid for iid, _ in libro.spine]
-    items = [libro.get_item_with_id(iid) for iid in spine_ids]
-    items = [i for i in items if i and i.get_type() == ebooklib.ITEM_DOCUMENT]
+    items    = [libro.get_item_with_id(iid) for iid in spine_ids]
+    items    = [i for i in items if i and i.get_type() == ebooklib.ITEM_DOCUMENT]
     if not items:
         items = list(libro.get_items_of_type(ebooklib.ITEM_DOCUMENT))
     return [limpiar_texto(extraer_texto_html(i.get_content())) for i in items]
 
+
+_RE_CHAPTER_HEADER = re.compile(
+    r'^\s*(cap[íi]tulo|chapter|parte|part|sección|section|prologue|epílogo|epilogue|preface)\b',
+    re.IGNORECASE
+)
+
+
 def fragmentos_pdf(path):
-    """Devuelve lista de textos limpios, agrupando ~20 páginas por capítulo."""
-    import fitz
-    doc = fitz.open(path)
-    paginas = [doc[i].get_text() for i in range(len(doc))]
-    doc.close()
+    """
+    Extracts text from PDF using pdfplumber (preferred) or PyMuPDF.
+    Detects chapters from structural headers. Falls back to 20-page grouping.
+    Warns if text is very sparse (likely scanned — needs OCR).
+    """
+    pages_text = []
+
+    try:
+        import pdfplumber
+        with pdfplumber.open(path) as pdf:
+            for page in pdf.pages:
+                text = page.extract_text(x_tolerance=3, y_tolerance=3) or ''
+                pages_text.append(text)
+    except ImportError:
+        import fitz
+        doc = fitz.open(path)
+        pages_text = [doc[i].get_text() for i in range(len(doc))]
+        doc.close()
+
+    # Detect likely-scanned PDF
+    total_chars = sum(len(p) for p in pages_text)
+    if total_chars < 200 * max(len(pages_text), 1):
+        # Try OCR fallback if pytesseract and PIL are available
+        try:
+            import fitz
+            from PIL import Image
+            import pytesseract
+            import io
+            doc = fitz.open(path)
+            ocr_pages = []
+            for i in range(len(doc)):
+                pix = doc[i].get_pixmap(dpi=200)
+                img = Image.open(io.BytesIO(pix.tobytes("png")))
+                ocr_pages.append(pytesseract.image_to_string(img))
+            doc.close()
+            pages_text = ocr_pages
+        except (ImportError, Exception):
+            pass
+
+    # Try to detect chapter boundaries from text
+    chapters, current = [], []
+    for page in pages_text:
+        if _RE_CHAPTER_HEADER.search(page) and current:
+            texto = limpiar_texto('\n'.join(current))
+            if len(texto.strip()) >= 300:
+                chapters.append(texto)
+            current = [page]
+        else:
+            current.append(page)
+    if current:
+        texto = limpiar_texto('\n'.join(current))
+        if texto.strip():
+            chapters.append(texto)
+
+    if len(chapters) >= 2:
+        return chapters
+
+    # Fallback: group by 20 pages
     PAGINAS_POR_CAP = 20
-    grupos = [paginas[i:i+PAGINAS_POR_CAP] for i in range(0, len(paginas), PAGINAS_POR_CAP)]
+    grupos = [pages_text[i:i+PAGINAS_POR_CAP] for i in range(0, len(pages_text), PAGINAS_POR_CAP)]
     return [limpiar_texto('\n'.join(g)) for g in grupos]
 
+
 def fragmentos_mobi(path):
-    """Convierte MOBI a HTML y divide por capítulos usando la TOC (NCX)."""
-    import mobi, shutil, re
+    import mobi
     tmpdir, ruta_html = mobi.extract(path)
     try:
         ncx_files = list(Path(tmpdir).rglob("*.ncx"))
@@ -418,23 +583,23 @@ def fragmentos_mobi(path):
             nav_points = ncx.find_all('navPoint')
             posiciones = []
             for np in nav_points:
-                src = np.find('content')
+                src   = np.find('content')
                 label = np.find('text')
                 if src:
-                    href = src.get('src', '')
+                    href  = src.get('src', '')
                     match = re.search(r'filepos(\d+)', href)
                     if match:
-                        pos = int(match.group(1))
+                        pos    = int(match.group(1))
                         titulo = label.get_text(strip=True) if label else f"Section {len(posiciones)+1}"
                         posiciones.append((pos, titulo))
 
             if len(posiciones) >= 2:
                 posiciones.sort()
                 resultados = []
-                for i, (pos, titulo) in enumerate(posiciones):
-                    fin = posiciones[i+1][0] if i+1 < len(posiciones) else len(html_bytes)
+                for i, (pos, _titulo) in enumerate(posiciones):
+                    fin           = posiciones[i+1][0] if i+1 < len(posiciones) else len(html_bytes)
                     fragmento_html = html_bytes[pos:fin]
-                    texto = limpiar_texto(extraer_texto_html(fragmento_html))
+                    texto         = limpiar_texto(extraer_texto_html(fragmento_html))
                     if len(texto.strip()) >= 300:
                         resultados.append(texto)
                 if resultados:
@@ -466,16 +631,16 @@ def fragmentos_mobi(path):
     finally:
         shutil.rmtree(tmpdir, ignore_errors=True)
 
+
 def obtener_fragmentos(path):
-    """Enruta al extractor correcto según extensión."""
     ext = Path(path).suffix.lower()
     if ext == '.epub': return fragmentos_epub(path)
     if ext == '.pdf':  return fragmentos_pdf(path)
     if ext == '.mobi': return fragmentos_mobi(path)
     raise ValueError(f"Formato no soportado: {ext}")
 
-def extraer_portada(path) -> bytes | None:
-    """Intenta extraer la portada del libro. Devuelve bytes de imagen o None."""
+
+def extraer_portada(path) -> Optional[bytes]:
     ext = Path(path).suffix.lower()
     try:
         if ext == '.epub':
@@ -498,7 +663,7 @@ def extraer_portada(path) -> bytes | None:
             doc.close()
 
         elif ext == '.mobi':
-            import mobi, shutil
+            import mobi
             tmpdir, _ = mobi.extract(path)
             try:
                 for img_file in Path(tmpdir).rglob("*"):
@@ -513,9 +678,9 @@ def extraer_portada(path) -> bytes | None:
         pass
     return None
 
+
 def extraer_metadatos_libro(path) -> dict:
-    """Extrae título, autor y año del libro si están disponibles en sus metadatos."""
-    ext = Path(path).suffix.lower()
+    ext  = Path(path).suffix.lower()
     meta = {'titulo': '', 'autor': '', 'anyo': ''}
     try:
         if ext == '.epub':
@@ -562,7 +727,7 @@ class EpubWorker(QThread):
     def run(self):
         try:
             fragmentos = obtener_fragmentos(self.epub_path)
-            total = len(fragmentos)
+            total      = len(fragmentos)
             guardados = descartados = 0
 
             for idx, texto in enumerate(fragmentos):
@@ -588,10 +753,9 @@ class EpubWorker(QThread):
 # ══════════════════════════════════════════════════════════════════════════════
 
 class VoicePreviewWorker(QThread):
-    done  = pyqtSignal(str)   # path to tmp wav file
+    done  = pyqtSignal(str)
     error = pyqtSignal(str)
 
-    # One pangram / sample sentence per language family
     PREVIEW_TEXTS = {
         'en': "The quick brown fox jumps over the lazy dog.",
         'es': "El veloz murciélago hindú comía feliz cardillo y kiwi.",
@@ -616,22 +780,20 @@ class VoicePreviewWorker(QThread):
 
     def run(self):
         try:
-            import tempfile
             lang_prefix = self.lang_code.split('_')[0] if self.lang_code else 'en'
             text  = self.PREVIEW_TEXTS.get(lang_prefix, self.PREVIEW_TEXTS['en'])
             voice = PiperVoice.load(self.voice_path)
             tmp_f = tempfile.NamedTemporaryFile(suffix='.wav', delete=False)
             tmp_f.close()
-            tmp   = tmp_f.name
-            with wave.open(tmp, 'wb') as wf:
+            with wave.open(tmp_f.name, 'wb') as wf:
                 voice.synthesize_wav(text, wf)
-            self.done.emit(tmp)
+            self.done.emit(tmp_f.name)
         except Exception as e:
             self.error.emit(str(e))
 
 
 # ══════════════════════════════════════════════════════════════════════════════
-# AUDIO WORKER
+# AUDIO HELPERS
 # ══════════════════════════════════════════════════════════════════════════════
 
 def wav_to_numpy(path):
@@ -651,7 +813,7 @@ def sintetizar(voice, texto, tmp):
 
 def trocear(texto):
     resultado = []
-    parrafos = re.split(r'\n\n+', texto.strip())
+    parrafos  = re.split(r'\n\n+', texto.strip())
     for i, p in enumerate(parrafos):
         p = p.strip()
         if not p: continue
@@ -664,26 +826,43 @@ def trocear(texto):
     return resultado
 
 
+# ══════════════════════════════════════════════════════════════════════════════
+# AUDIO WORKER  (enhanced: normalize, adjustable pauses, resume)
+# ══════════════════════════════════════════════════════════════════════════════
+
 class AudioWorker(QThread):
     progress     = pyqtSignal(int)
     file_started = pyqtSignal(str)
     file_done    = pyqtSignal(str, bool)
     eta_updated  = pyqtSignal(str)
+    skipped      = pyqtSignal(str)
     finished     = pyqtSignal()
     error        = pyqtSignal(str)
 
-    PAUSA_FRASE   = 0.55
-    PAUSA_PARRAFO = 1.20
-    PAUSA_INICIO  = 0.80
+    PAUSA_INICIO = 0.80
 
-    def __init__(self, txt_files, output_dir, voice_path, speed, metadata=None):
+    def __init__(self, txt_files, output_dir, voice_path, speed,
+                 metadata=None, normalize=True, pausa_frase=0.55,
+                 pausa_parrafo=1.20, resume=False):
         super().__init__()
-        self.txt_files  = txt_files
-        self.output_dir = output_dir
-        self.voice_path = voice_path
-        self.speed      = speed
-        self.metadata   = metadata or {}
-        self._stop      = False
+        self.txt_files    = txt_files
+        self.output_dir   = output_dir
+        self.voice_path   = voice_path
+        self.speed        = speed
+        self.metadata     = metadata or {}
+        self.normalize    = normalize
+        self.pausa_frase  = pausa_frase
+        self.pausa_parrafo = pausa_parrafo
+        self.resume       = resume
+        self._stop        = False
+
+    def _build_audio_filter(self) -> Optional[str]:
+        filters = []
+        if self.normalize:
+            filters.append("loudnorm=I=-16:LRA=11:TP=-1.5")
+        if self.speed != 1.0:
+            filters.append(f"atempo={self.speed:.2f}")
+        return ",".join(filters) if filters else None
 
     def _escribir_metadatos(self, mp3_path, pista, total):
         try:
@@ -710,8 +889,7 @@ class AudioWorker(QThread):
                 tags['TDRC'] = TDRC(encoding=3, text=anyo)
             if cover:
                 mime = 'image/jpeg' if cover[:3] == b'\xff\xd8\xff' else 'image/png'
-                tags['APIC'] = APIC(encoding=3, mime=mime, type=3,
-                                    desc='Cover', data=cover)
+                tags['APIC'] = APIC(encoding=3, mime=mime, type=3, desc='Cover', data=cover)
             tags.save(mp3_path)
         except Exception:
             pass
@@ -728,17 +906,27 @@ class AudioWorker(QThread):
             voice = PiperVoice.load(self.voice_path)
             tmp   = os.path.join(self.output_dir, "_tmp.wav")
 
-            sintetizar(voice, "warming up audio system.", tmp)
+            sintetizar(voice, "warming up.", tmp)
             _, sr, sw, nc = wav_to_numpy(tmp)
             os.remove(tmp)
 
             total      = len(self.txt_files)
             file_times = []
+            audio_filt = self._build_audio_filter()
 
             for idx, txt_path in enumerate(self.txt_files):
                 if self._stop: break
-                t_start = time.time()
                 name = Path(txt_path).stem
+
+                # ── Progreso persistente (resume) ─────────────────────────────
+                out_mp3 = os.path.join(self.output_dir, f"{name}.mp3")
+                if self.resume and os.path.exists(out_mp3):
+                    self.skipped.emit(name)
+                    self.file_done.emit(name, True)
+                    self.progress.emit(int((idx+1)/total*100))
+                    continue
+
+                t_start = time.time()
                 self.file_started.emit(name)
                 try:
                     with open(txt_path, "r", encoding="utf-8") as f:
@@ -759,7 +947,7 @@ class AudioWorker(QThread):
                             if not frase.strip(): continue
                             out_wf.writeframes(sintetizar(voice, frase, tmp).tobytes())
                             if k < len(fragmentos) - 1:
-                                pausa = self.PAUSA_PARRAFO if tipo == 'parrafo' else self.PAUSA_FRASE
+                                pausa = self.pausa_parrafo if tipo == 'parrafo' else self.pausa_frase
                                 out_wf.writeframes(silencio(pausa, sr).tobytes())
 
                     if os.path.exists(tmp): os.remove(tmp)
@@ -769,16 +957,15 @@ class AudioWorker(QThread):
                         self.file_done.emit(name, False)
                         break
 
-                    out_mp3 = os.path.join(self.output_dir, f"{name}.mp3")
                     cmd = ["ffmpeg", "-y", "-i", out_wav,
                            "-codec:a", "libmp3lame", "-qscale:a", "2"]
-                    if self.speed != 1.0:
-                        cmd += ["-filter:a", f"atempo={self.speed:.2f}"]
+                    if audio_filt:
+                        cmd += ["-filter:a", audio_filt]
                     cmd.append(out_mp3)
                     result = subprocess.run(cmd, capture_output=True)
                     if result.returncode == 0 and os.path.exists(out_mp3):
                         os.remove(out_wav)
-                        self._escribir_metadatos(out_mp3, idx+1, len(self.txt_files))
+                        self._escribir_metadatos(out_mp3, idx+1, total)
                         self.file_done.emit(name, True)
                     else:
                         self.file_done.emit(name, False)
@@ -787,7 +974,6 @@ class AudioWorker(QThread):
                     self.error.emit(f"{name}: {e}")
                     self.file_done.emit(name, False)
 
-                # ── ETA calculation ───────────────────────────────────────────
                 file_times.append(time.time() - t_start)
                 remaining = total - idx - 1
                 if remaining > 0:
@@ -805,6 +991,277 @@ class AudioWorker(QThread):
 
 
 # ══════════════════════════════════════════════════════════════════════════════
+# M4B WORKER  (new)
+# ══════════════════════════════════════════════════════════════════════════════
+
+class M4bWorker(QThread):
+    progress = pyqtSignal(int)
+    log      = pyqtSignal(str)
+    finished = pyqtSignal(str)   # path to generated .m4b
+    error    = pyqtSignal(str)
+
+    def __init__(self, mp3_files: list, output_path: str, metadata: dict):
+        super().__init__()
+        self.mp3_files   = mp3_files
+        self.output_path = output_path
+        self.metadata    = metadata
+
+    def _get_duration_ms(self, path: str) -> int:
+        result = subprocess.run(
+            ["ffprobe", "-v", "error", "-show_entries", "format=duration",
+             "-of", "default=noprint_wrappers=1:nokey=1", path],
+            capture_output=True, text=True
+        )
+        try:
+            return int(float(result.stdout.strip()) * 1000)
+        except (ValueError, AttributeError):
+            return 0
+
+    def run(self):
+        try:
+            tmp_dir = tempfile.mkdtemp()
+            n = len(self.mp3_files)
+
+            # Build chapter durations
+            self.log.emit("Calculando duraciones…")
+            durations = []
+            for i, mp3 in enumerate(self.mp3_files):
+                durations.append(self._get_duration_ms(mp3))
+                self.progress.emit(int((i+1)/n * 30))
+
+            # Build ffmetadata with chapters
+            meta_lines = [";FFMETADATA1"]
+            if self.metadata.get('titulo'):
+                meta_lines.append(f"title={self.metadata['titulo']}")
+            if self.metadata.get('autor'):
+                meta_lines.append(f"artist={self.metadata['autor']}")
+            if self.metadata.get('anyo'):
+                meta_lines.append(f"date={self.metadata['anyo']}")
+            meta_lines.append("genre=Audiobook")
+            meta_lines.append("")
+
+            offset_ms = 0
+            for mp3, dur_ms in zip(self.mp3_files, durations):
+                meta_lines += [
+                    "[CHAPTER]",
+                    "TIMEBASE=1/1000",
+                    f"START={offset_ms}",
+                    f"END={offset_ms + dur_ms}",
+                    f"title={Path(mp3).stem}",
+                    "",
+                ]
+                offset_ms += dur_ms
+
+            meta_file = os.path.join(tmp_dir, "chapters.txt")
+            with open(meta_file, 'w', encoding='utf-8') as f:
+                f.write('\n'.join(meta_lines))
+
+            # ffmpeg concat file
+            concat_file = os.path.join(tmp_dir, "concat.txt")
+            with open(concat_file, 'w', encoding='utf-8') as f:
+                for mp3 in self.mp3_files:
+                    f.write(f"file '{mp3.replace(chr(39), chr(39)+chr(92)+chr(39)+chr(39))}'\n")
+
+            self.log.emit("Codificando M4B…")
+            self.progress.emit(40)
+
+            cover = self.metadata.get('cover')
+            if cover:
+                cover_file = os.path.join(tmp_dir, "cover.jpg")
+                with open(cover_file, 'wb') as f:
+                    f.write(cover)
+                cmd = [
+                    "ffmpeg", "-y",
+                    "-f", "concat", "-safe", "0", "-i", concat_file,
+                    "-i", meta_file,
+                    "-i", cover_file,
+                    "-map", "0:a", "-map", "2:v",
+                    "-map_metadata", "1",
+                    "-c:a", "aac", "-b:a", "64k",
+                    "-c:v", "copy", "-disposition:v", "attached_pic",
+                    "-movflags", "+faststart",
+                    self.output_path,
+                ]
+            else:
+                cmd = [
+                    "ffmpeg", "-y",
+                    "-f", "concat", "-safe", "0", "-i", concat_file,
+                    "-i", meta_file,
+                    "-map_metadata", "1",
+                    "-c:a", "aac", "-b:a", "64k",
+                    "-movflags", "+faststart",
+                    self.output_path,
+                ]
+
+            result = subprocess.run(cmd, capture_output=True)
+            self.progress.emit(100)
+
+            if result.returncode == 0:
+                self.log.emit(f"✅ M4B generado: {Path(self.output_path).name}")
+                self.finished.emit(self.output_path)
+            else:
+                err = result.stderr.decode('utf-8', errors='replace')[-400:]
+                self.error.emit(err)
+
+        except Exception as e:
+            self.error.emit(str(e))
+        finally:
+            shutil.rmtree(tmp_dir, ignore_errors=True)
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# INTEGRATED PLAYER WIDGET  (new)
+# ══════════════════════════════════════════════════════════════════════════════
+
+class PlayerWidget(QWidget):
+    """Mini audio player for browsing and playing generated chapter MP3s."""
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        if not HAS_MULTIMEDIA:
+            lbl = QLabel("Reproductor no disponible (requiere PyQt6-Qt6Multimedia).")
+            lbl.setObjectName("status_idle")
+            QVBoxLayout(self).addWidget(lbl)
+            return
+
+        self._player = QMediaPlayer()
+        self._audio_out = QAudioOutput()
+        self._player.setAudioOutput(self._audio_out)
+        self._audio_out.setVolume(0.8)
+        self._files: list[str] = []
+        self._current_idx = 0
+        self._seeking = False
+        self._build_ui()
+        self._connect()
+
+    def _build_ui(self):
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(0, 4, 0, 0)
+        layout.setSpacing(6)
+
+        self.lbl_track = QLabel("—  (doble clic en un capítulo para reproducir)")
+        self.lbl_track.setObjectName("status_idle")
+        layout.addWidget(self.lbl_track)
+
+        self.slider_pos = QSlider(Qt.Orientation.Horizontal)
+        self.slider_pos.setRange(0, 1000)
+        self.slider_pos.sliderPressed.connect(lambda: setattr(self, '_seeking', True))
+        self.slider_pos.sliderReleased.connect(self._seek)
+        layout.addWidget(self.slider_pos)
+
+        row = QHBoxLayout(); row.setSpacing(6)
+        self.btn_prev = QPushButton("⏮"); self.btn_prev.setObjectName("player_btn"); self.btn_prev.setFixedWidth(36)
+        self.btn_play = QPushButton("▶"); self.btn_play.setObjectName("player_btn"); self.btn_play.setFixedWidth(46)
+        self.btn_next = QPushButton("⏭"); self.btn_next.setObjectName("player_btn"); self.btn_next.setFixedWidth(36)
+        self.lbl_time = QLabel("0:00 / 0:00"); self.lbl_time.setObjectName("status_idle")
+        self.lbl_vol  = QLabel("🔊"); self.lbl_vol.setObjectName("status_idle")
+        self.slider_vol = QSlider(Qt.Orientation.Horizontal)
+        self.slider_vol.setRange(0, 100); self.slider_vol.setValue(80)
+        self.slider_vol.setMaximumWidth(80)
+        self.slider_vol.valueChanged.connect(lambda v: self._audio_out.setVolume(v / 100))
+
+        row.addWidget(self.btn_prev)
+        row.addWidget(self.btn_play)
+        row.addWidget(self.btn_next)
+        row.addWidget(self.lbl_time)
+        row.addStretch()
+        row.addWidget(self.lbl_vol)
+        row.addWidget(self.slider_vol)
+        layout.addLayout(row)
+
+    def _connect(self):
+        self.btn_play.clicked.connect(self._toggle_play)
+        self.btn_prev.clicked.connect(self._prev)
+        self.btn_next.clicked.connect(self._next)
+        self._player.positionChanged.connect(self._on_position)
+        self._player.durationChanged.connect(lambda _: self._on_position(self._player.position()))
+        self._player.playbackStateChanged.connect(self._on_state)
+        self._player.mediaStatusChanged.connect(self._on_media_status)
+
+    def set_files(self, files: list):
+        self._files = list(files)
+
+    def play_file(self, path: str):
+        if path in self._files:
+            self._current_idx = self._files.index(path)
+        else:
+            self._files.insert(0, path)
+            self._current_idx = 0
+        self._load_current()
+        self._player.play()
+
+    def _load_current(self):
+        if 0 <= self._current_idx < len(self._files):
+            path = self._files[self._current_idx]
+            self._player.setSource(QUrl.fromLocalFile(path))
+            self.lbl_track.setText(f"♪  {Path(path).stem}")
+
+    def _toggle_play(self):
+        if self._player.playbackState() == QMediaPlayer.PlaybackState.PlayingState:
+            self._player.pause()
+        else:
+            self._player.play()
+
+    def _prev(self):
+        if self._current_idx > 0:
+            self._current_idx -= 1
+            self._load_current(); self._player.play()
+
+    def _next(self):
+        if self._current_idx < len(self._files) - 1:
+            self._current_idx += 1
+            self._load_current(); self._player.play()
+
+    def _seek(self):
+        self._seeking = False
+        dur = self._player.duration()
+        if dur > 0:
+            self._player.setPosition(int(self.slider_pos.value() / 1000 * dur))
+
+    def _on_position(self, pos):
+        if self._seeking: return
+        dur = self._player.duration()
+        if dur > 0:
+            self.slider_pos.setValue(int(pos / dur * 1000))
+        self.lbl_time.setText(f"{self._fmt(pos)} / {self._fmt(dur)}")
+
+    def _on_state(self, state):
+        self.btn_play.setText("⏸" if state == QMediaPlayer.PlaybackState.PlayingState else "▶")
+
+    def _on_media_status(self, status):
+        if status == QMediaPlayer.MediaStatus.EndOfMedia:
+            self._next()
+
+    @staticmethod
+    def _fmt(ms):
+        s = ms // 1000
+        return f"{s//60}:{s%60:02d}"
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# QUEUE PROJECT  (new)
+# ══════════════════════════════════════════════════════════════════════════════
+
+@dataclass
+class QueueProject:
+    book_path:     str
+    txt_folder:    str
+    output_folder: str
+    voice_path:    str
+    speed:         float
+    titulo:        str = ""
+    autor:         str = ""
+    anyo:          str = ""
+    normalize:     bool = True
+    pausa_frase:   float = 0.55
+    pausa_parrafo: float = 1.20
+    cover:         Optional[bytes] = field(default=None, repr=False)
+
+    def display_name(self) -> str:
+        return self.titulo or Path(self.book_path).stem
+
+
+# ══════════════════════════════════════════════════════════════════════════════
 # MAIN WINDOW
 # ══════════════════════════════════════════════════════════════════════════════
 
@@ -813,8 +1270,8 @@ SESSION_FILE = Path(__file__).parent / "session.json"
 class AudiobookApp(QMainWindow):
     def __init__(self):
         super().__init__()
-        self.setWindowTitle("Generador de Audiolibros")
-        self.setMinimumSize(700, 860)
+        self.setWindowTitle("Generador de Audiolibros  v2.0")
+        self.setMinimumSize(720, 960)
         self.setStyleSheet(STYLESHEET)
         self.setAcceptDrops(True)
         self.epub_path      = ""
@@ -824,8 +1281,11 @@ class AudiobookApp(QMainWindow):
         self.epub_worker    = None
         self.audio_worker   = None
         self.preview_worker = None
+        self.m4b_worker     = None
         self.cover_data     = None
-        self._voice_langs   = {}   # stem → lang_code
+        self._voice_langs   = {}
+        self._queue: list[QueueProject] = []
+        self._queue_idx = 0
         self._build_ui()
         self._load_session()
 
@@ -846,13 +1306,11 @@ class AudiobookApp(QMainWindow):
     # ── Session ───────────────────────────────────────────────────────────────
     def _load_session(self):
         try:
-            if not SESSION_FILE.exists():
-                return
+            if not SESSION_FILE.exists(): return
             data = json.loads(SESSION_FILE.read_text(encoding='utf-8'))
 
             if data.get('epub_path') and Path(data['epub_path']).exists():
                 self._set_epub_path(data['epub_path'], fill_meta=False)
-
             if data.get('txt_folder') and Path(data['txt_folder']).exists():
                 self.txt_folder = data['txt_folder']
                 self.lbl_txt.setText(data['txt_folder'])
@@ -860,7 +1318,6 @@ class AudiobookApp(QMainWindow):
                 self._scan_txt_files()
                 if self.txt_files:
                     self.btn_generate.setEnabled(True)
-
             if data.get('output_folder'):
                 self.output_folder = data['output_folder']
                 self.lbl_output.setText(data['output_folder'])
@@ -870,12 +1327,16 @@ class AudiobookApp(QMainWindow):
             if data.get('autor'):  self.txt_autor.setText(data['autor'])
             if data.get('anyo'):   self.txt_anyo.setText(data['anyo'])
             if data.get('speed'):  self.slider_speed.setValue(int(data['speed']))
-
+            if data.get('normalize') is not None:
+                self.chk_normalize.setChecked(bool(data['normalize']))
+            if data.get('pausa_frase'):
+                self.spin_pausa_frase.setValue(float(data['pausa_frase']))
+            if data.get('pausa_parrafo'):
+                self.spin_pausa_parrafo.setValue(float(data['pausa_parrafo']))
             if data.get('voice'):
                 for i in range(self.combo_voice.count()):
                     if self.combo_voice.itemData(i) == data['voice']:
-                        self.combo_voice.setCurrentIndex(i)
-                        break
+                        self.combo_voice.setCurrentIndex(i); break
         except Exception:
             pass
 
@@ -890,6 +1351,9 @@ class AudiobookApp(QMainWindow):
                 'titulo':        self.txt_titulo.text(),
                 'autor':         self.txt_autor.text(),
                 'anyo':          self.txt_anyo.text(),
+                'normalize':     self.chk_normalize.isChecked(),
+                'pausa_frase':   self.spin_pausa_frase.value(),
+                'pausa_parrafo': self.spin_pausa_parrafo.value(),
             }
             SESSION_FILE.write_text(json.dumps(data, indent=2), encoding='utf-8')
         except Exception:
@@ -906,9 +1370,8 @@ class AudiobookApp(QMainWindow):
         root.setContentsMargins(24, 24, 24, 24)
         root.setSpacing(12)
 
-        # Cabecera
         title    = QLabel("📚 AUDIOLIBROS"); title.setObjectName("title")
-        subtitle = QLabel("AUDIOBOOK GENERATOR"); subtitle.setObjectName("subtitle")
+        subtitle = QLabel("AUDIOBOOK GENERATOR  v2.0"); subtitle.setObjectName("subtitle")
         root.addWidget(title); root.addWidget(subtitle); root.addWidget(hline())
 
         # ── FASE 1 ──────────────────────────────────────────────────────────
@@ -966,7 +1429,6 @@ class AudiobookApp(QMainWindow):
         row_out.addWidget(self.lbl_output); row_out.addWidget(btn_out)
         self.card3.add_layout(row_out)
 
-        # Voz + badge de calidad + botón de prueba
         self.card3.add_widget(section_label("Voz"))
         row_voice = QHBoxLayout(); row_voice.setSpacing(8)
         self.combo_voice = QComboBox(); self._populate_voices()
@@ -978,9 +1440,8 @@ class AudiobookApp(QMainWindow):
         row_voice.addWidget(self.lbl_quality)
         row_voice.addWidget(self.btn_preview_voice)
         self.card3.add_layout(row_voice)
-        self._on_voice_changed()  # init badge
+        self._on_voice_changed()
 
-        # Metadatos
         self.card3.add_widget(section_label("Metadatos del audiolibro"))
         meta_style = f"""
             QLineEdit {{
@@ -1007,7 +1468,6 @@ class AudiobookApp(QMainWindow):
         row_meta.addWidget(self.txt_anyo, 1)
         self.card3.add_layout(row_meta)
 
-        # Portada
         self.card3.add_widget(section_label("Portada"))
         row_cover = QHBoxLayout(); row_cover.setSpacing(10)
         self.lbl_cover = QLabel("Se intentará extraer del libro automáticamente.")
@@ -1023,19 +1483,60 @@ class AudiobookApp(QMainWindow):
         row_cover.addWidget(btn_clear_cover)
         self.card3.add_layout(row_cover)
 
+        # Velocidad
         self.card3.add_widget(section_label("Velocidad de narración"))
         row_spd = QHBoxLayout()
         self.slider_speed = QSlider(Qt.Orientation.Horizontal)
         self.slider_speed.setRange(70, 150); self.slider_speed.setValue(100)
         self.lbl_speed = QLabel("1.00×"); self.lbl_speed.setObjectName("speed_val")
-        self.slider_speed.valueChanged.connect(lambda v: self.lbl_speed.setText(f"{v/100:.2f}×"))
+        self.slider_speed.valueChanged.connect(lambda v: (
+            self.lbl_speed.setText(f"{v/100:.2f}×"), self._save_session()
+        ))
         row_spd.addWidget(self.slider_speed); row_spd.addWidget(self.lbl_speed)
         self.card3.add_layout(row_spd)
 
-        self.card3.add_widget(section_label("Archivos a procesar"))
+        # ── Pausas ajustables ──────────────────────────────────────────────
+        self.card3.add_widget(section_label("Pausas"))
+        row_pausa = QHBoxLayout(); row_pausa.setSpacing(14)
+
+        lbl_pf = QLabel("Entre frases:"); lbl_pf.setObjectName("section")
+        self.spin_pausa_frase = QDoubleSpinBox()
+        self.spin_pausa_frase.setRange(0.10, 2.0); self.spin_pausa_frase.setValue(0.55)
+        self.spin_pausa_frase.setSingleStep(0.05); self.spin_pausa_frase.setSuffix(" s")
+        self.spin_pausa_frase.setDecimals(2); self.spin_pausa_frase.setFixedWidth(90)
+        self.spin_pausa_frase.valueChanged.connect(self._save_session)
+
+        lbl_pp = QLabel("Entre párrafos:"); lbl_pp.setObjectName("section")
+        self.spin_pausa_parrafo = QDoubleSpinBox()
+        self.spin_pausa_parrafo.setRange(0.20, 4.0); self.spin_pausa_parrafo.setValue(1.20)
+        self.spin_pausa_parrafo.setSingleStep(0.05); self.spin_pausa_parrafo.setSuffix(" s")
+        self.spin_pausa_parrafo.setDecimals(2); self.spin_pausa_parrafo.setFixedWidth(90)
+        self.spin_pausa_parrafo.valueChanged.connect(self._save_session)
+
+        row_pausa.addWidget(lbl_pf); row_pausa.addWidget(self.spin_pausa_frase)
+        row_pausa.addSpacing(10)
+        row_pausa.addWidget(lbl_pp); row_pausa.addWidget(self.spin_pausa_parrafo)
+        row_pausa.addStretch()
+        self.card3.add_layout(row_pausa)
+
+        # ── Opciones: normalizar + resume ──────────────────────────────────
+        row_opts = QHBoxLayout(); row_opts.setSpacing(20)
+        self.chk_normalize = QCheckBox("Normalizar volumen (LUFS -16)")
+        self.chk_normalize.setChecked(True)
+        self.chk_normalize.stateChanged.connect(self._save_session)
+        self.chk_resume = QCheckBox("Reanudar (omitir capítulos ya generados)")
+        self.chk_resume.setChecked(False)
+        row_opts.addWidget(self.chk_normalize)
+        row_opts.addWidget(self.chk_resume)
+        row_opts.addStretch()
+        self.card3.add_layout(row_opts)
+
+        # Archivos
+        self.card3.add_widget(section_label("Archivos a procesar  (doble clic = reproducir)"))
         self.file_list = QListWidget()
         self.file_list.setMinimumHeight(100); self.file_list.setMaximumHeight(150)
         self.file_list.currentItemChanged.connect(self._on_chapter_selected)
+        self.file_list.itemDoubleClicked.connect(self._on_chapter_double_clicked)
         self.card3.add_widget(self.file_list)
 
         # Chapter preview
@@ -1045,6 +1546,11 @@ class AudiobookApp(QMainWindow):
         self.chapter_preview.setMaximumHeight(110)
         self.chapter_preview.setPlaceholderText("Selecciona un capítulo para ver una vista previa…")
         self.card3.add_widget(self.chapter_preview)
+
+        # ── Reproductor integrado ──────────────────────────────────────────
+        self.card3.add_widget(section_label("Reproductor"))
+        self.player = PlayerWidget()
+        self.card3.add_widget(self.player)
 
         self.prog_audio = QProgressBar(); self.prog_audio.setValue(0)
         self.card3.add_widget(self.prog_audio)
@@ -1070,7 +1576,53 @@ class AudiobookApp(QMainWindow):
         row3.addWidget(self.btn_open_folder)
         self.card3.add_layout(row3)
 
+        # ── Exportar M4B ──────────────────────────────────────────────────
+        self.btn_export_m4b = QPushButton("📦  EXPORTAR COMO M4B")
+        self.btn_export_m4b.setObjectName("secondary_btn")
+        self.btn_export_m4b.clicked.connect(self._export_m4b)
+        self.btn_export_m4b.hide()
+        self.card3.add_widget(self.btn_export_m4b)
+
+        self.prog_m4b = QProgressBar(); self.prog_m4b.setValue(0)
+        self.prog_m4b.hide()
+        self.card3.add_widget(self.prog_m4b)
+
+        self.status_m4b = QLabel(""); self.status_m4b.setObjectName("status_idle")
+        self.status_m4b.hide()
+        self.card3.add_widget(self.status_m4b)
+
         root.addWidget(self.card3)
+
+        # ── COLA DE PROYECTOS ────────────────────────────────────────────
+        self.card_queue = PhaseCard(3, "Cola de proyectos")
+        self.card_queue.set_state("idle")
+
+        self.card_queue.add_widget(section_label("Proyectos en cola"))
+        self.queue_list = QListWidget()
+        self.queue_list.setMinimumHeight(70); self.queue_list.setMaximumHeight(120)
+        self.card_queue.add_widget(self.queue_list)
+
+        self.status_queue = QLabel("Cola vacía. Configura un proyecto y usa 'Añadir a cola'.")
+        self.status_queue.setObjectName("status_idle")
+        self.card_queue.add_widget(self.status_queue)
+
+        row_q = QHBoxLayout(); row_q.setSpacing(10)
+        self.btn_add_queue = QPushButton("➕  AÑADIR A COLA")
+        self.btn_add_queue.setObjectName("secondary_btn")
+        self.btn_add_queue.clicked.connect(self._add_to_queue)
+        self.btn_remove_queue = QPushButton("✕  QUITAR")
+        self.btn_remove_queue.setObjectName("secondary_btn")
+        self.btn_remove_queue.clicked.connect(self._remove_from_queue)
+        self.btn_process_queue = QPushButton("▶  PROCESAR COLA")
+        self.btn_process_queue.setObjectName("primary_btn")
+        self.btn_process_queue.clicked.connect(self._process_queue)
+        self.btn_process_queue.setEnabled(False)
+        row_q.addWidget(self.btn_add_queue)
+        row_q.addWidget(self.btn_remove_queue)
+        row_q.addWidget(self.btn_process_queue)
+        self.card_queue.add_layout(row_q)
+
+        root.addWidget(self.card_queue)
         root.addStretch()
 
     # ── Voice helpers ─────────────────────────────────────────────────────────
@@ -1083,7 +1635,7 @@ class AudiobookApp(QMainWindow):
                 self._voice_langs[f.stem] = lang
                 self.combo_voice.addItem(label, str(f))
         else:
-            self.combo_voice.addItem("(no voices found — place .onnx files in the root folder)", "")
+            self.combo_voice.addItem("(sin voces — coloca archivos .onnx en la carpeta raíz)", "")
 
     def _on_voice_changed(self):
         voice_path = self.combo_voice.currentData() or ""
@@ -1127,7 +1679,35 @@ class AudiobookApp(QMainWindow):
             try: os.startfile(wav_path)
             except Exception: pass
 
-    # ── Chapter preview ────────────────────────────────────────────────────────
+    # ── Language detection & auto-voice ───────────────────────────────────────
+    def _detect_and_auto_voice(self):
+        if not self.txt_folder: return
+        txts = sorted(Path(self.txt_folder).glob("*.txt"))
+        if not txts: return
+        try:
+            texto = txts[0].read_text(encoding='utf-8')[:3000]
+            lang  = detectar_idioma(texto)
+            self._auto_select_voice(lang)
+        except Exception:
+            pass
+
+    def _auto_select_voice(self, lang_code: str):
+        lang_prefix = lang_code[:2].lower()
+        for priority in ['high', 'medium', 'low', 'x_low']:
+            for i in range(self.combo_voice.count()):
+                stem = Path(self.combo_voice.itemData(i) or '').stem
+                if not stem: continue
+                _, voice_lang, quality = parse_voice_name(stem)
+                if voice_lang[:2].lower() == lang_prefix and quality == priority:
+                    self.combo_voice.setCurrentIndex(i)
+                    set_status(
+                        self.status3,
+                        f"💡 Idioma detectado: {lang_code} — voz seleccionada automáticamente.",
+                        "ok"
+                    )
+                    return
+
+    # ── Chapter preview & player ───────────────────────────────────────────────
     def _on_chapter_selected(self, current, _previous):
         if current is None:
             self.chapter_preview.clear(); return
@@ -1140,6 +1720,21 @@ class AudiobookApp(QMainWindow):
             self.chapter_preview.setPlainText(content + ("…" if len(content) >= 600 else ""))
         except Exception:
             self.chapter_preview.clear()
+
+    def _on_chapter_double_clicked(self, item):
+        if not HAS_MULTIMEDIA or not self.output_folder: return
+        txt_path = item.data(Qt.ItemDataRole.UserRole)
+        if not txt_path: return
+        mp3 = Path(self.output_folder) / f"{Path(txt_path).stem}.mp3"
+        if mp3.exists():
+            self.player.play_file(str(mp3))
+        else:
+            set_status(self.status3, "⚠ Genera el audiolibro primero para reproducir.", "warn")
+
+    def _refresh_player(self):
+        if not HAS_MULTIMEDIA or not self.output_folder: return
+        mp3s = sorted(Path(self.output_folder).glob("*.mp3"))
+        self.player.set_files([str(f) for f in mp3s])
 
     # ── Metadata auto-fill ────────────────────────────────────────────────────
     def _set_epub_path(self, path, fill_meta=True):
@@ -1162,8 +1757,7 @@ class AudiobookApp(QMainWindow):
         self._save_session()
 
     def _suggest_output_folder(self):
-        if self.output_folder:
-            return
+        if self.output_folder: return
         titulo = self.txt_titulo.text().strip()
         base   = self.txt_folder
         if titulo and base:
@@ -1172,7 +1766,6 @@ class AudiobookApp(QMainWindow):
             self.lbl_output.setText(self.output_folder)
             self.lbl_output.setStyleSheet(f"color: {TEXT_MUTED};")
 
-    # ── Open output folder ────────────────────────────────────────────────────
     def _open_output_folder(self):
         if self.output_folder and Path(self.output_folder).exists():
             os.startfile(self.output_folder)
@@ -1180,8 +1773,7 @@ class AudiobookApp(QMainWindow):
     # ── Cover ─────────────────────────────────────────────────────────────────
     def _pick_cover(self):
         path, _ = QFileDialog.getOpenFileName(
-            self, "Selecciona portada", "",
-            "Imágenes (*.jpg *.jpeg *.png)"
+            self, "Selecciona portada", "", "Imágenes (*.jpg *.jpeg *.png)"
         )
         if path:
             with open(path, 'rb') as f:
@@ -1200,8 +1792,7 @@ class AudiobookApp(QMainWindow):
             self, "Selecciona libro", "",
             "Libros (*.epub *.pdf *.mobi);;EPUB (*.epub);;PDF (*.pdf);;MOBI (*.mobi)"
         )
-        if path:
-            self._set_epub_path(path)
+        if path: self._set_epub_path(path)
 
     def _pick_txt_folder(self):
         folder = QFileDialog.getExistingDirectory(self, "Carpeta para los TXT")
@@ -1211,8 +1802,7 @@ class AudiobookApp(QMainWindow):
             self.lbl_txt.setStyleSheet(f"color: {TEXT_PRIMARY};")
             self._scan_txt_files()
             self._suggest_output_folder()
-            if self.txt_files:
-                self.btn_generate.setEnabled(True)
+            if self.txt_files: self.btn_generate.setEnabled(True)
             self._save_session()
 
     def _start_extract(self):
@@ -1228,9 +1818,14 @@ class AudiobookApp(QMainWindow):
         set_status(self.status1, "⏳ Extrayendo y limpiando texto…", "run")
         self.epub_worker = EpubWorker(self.epub_path, self.txt_folder)
         self.epub_worker.progress.connect(self.prog_extract.setValue)
-        self.epub_worker.log.connect(lambda m: (self.list_extract.addItem(m), self.list_extract.scrollToBottom()))
+        self.epub_worker.log.connect(lambda m: (
+            self.list_extract.addItem(m), self.list_extract.scrollToBottom()
+        ))
         self.epub_worker.finished.connect(self._on_extract_done)
-        self.epub_worker.error.connect(lambda e: (set_status(self.status1, f"❌ {e}", "err"), self.btn_extract.setEnabled(True)))
+        self.epub_worker.error.connect(lambda e: (
+            set_status(self.status1, f"❌ {e}", "err"),
+            self.btn_extract.setEnabled(True)
+        ))
         self.epub_worker.start()
 
     def _on_extract_done(self, guardados, descartados):
@@ -1244,7 +1839,7 @@ class AudiobookApp(QMainWindow):
         msg.setText(
             f"<b>✅ {guardados} capítulos extraídos</b> ({descartados} fragmentos descartados).<br><br>"
             f"Los archivos TXT están en:<br><code>{self.txt_folder}</code><br><br>"
-            "Puedes editarlos ahora si lo necesitas antes de generar el audio.<br>"
+            "Puedes editarlos antes de generar el audio.<br>"
             "Cuando estés listo, pulsa <b>Continuar</b>."
         )
         msg.setStandardButtons(QMessageBox.StandardButton.Ok)
@@ -1259,6 +1854,9 @@ class AudiobookApp(QMainWindow):
             QPushButton:hover {{ background-color: {ACCENT_GLOW}; }}
         """)
         msg.exec()
+
+        # Detección de idioma automática (post-dialog)
+        self._detect_and_auto_voice()
 
         self.card3.set_state("active")
         self._suggest_output_folder()
@@ -1280,6 +1878,7 @@ class AudiobookApp(QMainWindow):
             self.file_list.addItem(item)
         count = len(self.txt_files)
         set_status(self.status3, f"{count} archivo{'s' if count!=1 else ''} listos para procesar.", "idle")
+        self._refresh_player()
 
     # ── FASE 2 ────────────────────────────────────────────────────────────────
     def _pick_output(self):
@@ -1298,25 +1897,34 @@ class AudiobookApp(QMainWindow):
         voice_path = self.combo_voice.currentData()
         if not voice_path or not os.path.exists(voice_path):
             set_status(self.status3, "⚠ Modelo de voz no encontrado.", "err"); return
+
         os.makedirs(self.output_folder, exist_ok=True)
         self.btn_generate.setEnabled(False); self.btn_stop.setEnabled(True)
         self.btn_open_folder.setEnabled(False)
+        self.btn_export_m4b.hide(); self.prog_m4b.hide(); self.status_m4b.hide()
         self.prog_audio.setValue(0); self._reset_list_icons()
         cover = self.cover_data or extraer_portada(self.epub_path)
 
         self.audio_worker = AudioWorker(
-            [str(f) for f in self.txt_files], self.output_folder,
-            voice_path, self.slider_speed.value() / 100.0,
+            [str(f) for f in self.txt_files],
+            self.output_folder,
+            voice_path,
+            self.slider_speed.value() / 100.0,
             metadata={
                 'titulo': self.txt_titulo.text().strip(),
                 'autor':  self.txt_autor.text().strip(),
                 'anyo':   self.txt_anyo.text().strip(),
                 'cover':  cover,
-            }
+            },
+            normalize    = self.chk_normalize.isChecked(),
+            pausa_frase  = self.spin_pausa_frase.value(),
+            pausa_parrafo = self.spin_pausa_parrafo.value(),
+            resume       = self.chk_resume.isChecked(),
         )
         self.audio_worker.progress.connect(self.prog_audio.setValue)
         self.audio_worker.file_started.connect(self._on_file_started)
         self.audio_worker.file_done.connect(self._on_file_done)
+        self.audio_worker.skipped.connect(self._on_file_skipped)
         self.audio_worker.eta_updated.connect(
             lambda eta: set_status(self.status3, f"⏳ Generando…  {eta}", "run")
         )
@@ -1344,6 +1952,13 @@ class AudiobookApp(QMainWindow):
             item = self.file_list.item(i)
             if name in item.text():
                 item.setText(f"{icon}  {name}.txt → {name}.mp3" if ok else f"{icon}  {name}.txt")
+        if ok: self._refresh_player()
+
+    def _on_file_skipped(self, name):
+        for i in range(self.file_list.count()):
+            item = self.file_list.item(i)
+            if name in item.text():
+                item.setText(f"⏭  {name}.mp3  (ya existía)")
 
     def _on_audio_finished(self):
         set_status(self.status3, "✅ ¡Audiolibro generado correctamente!", "ok")
@@ -1351,11 +1966,153 @@ class AudiobookApp(QMainWindow):
         self.btn_generate.setEnabled(True); self.btn_stop.setEnabled(False)
         self.btn_open_folder.setEnabled(True)
         self.prog_audio.setValue(100)
+        self.btn_export_m4b.show()
+        self._refresh_player()
+        # Advance queue if processing
+        if self._queue and self._queue_idx < len(self._queue):
+            self._queue_idx += 1
+            self._process_next_in_queue()
 
     def _reset_list_icons(self):
         for i in range(self.file_list.count()):
             item = self.file_list.item(i)
             item.setText(f"📄  {Path(self.txt_files[i]).name}")
+
+    # ── M4B export ────────────────────────────────────────────────────────────
+    def _export_m4b(self):
+        if not self.output_folder:
+            set_status(self.status3, "⚠ Sin carpeta de salida.", "err"); return
+        mp3s = sorted(Path(self.output_folder).glob("*.mp3"))
+        if not mp3s:
+            set_status(self.status3, "⚠ No hay MP3 para exportar.", "err"); return
+
+        titulo = self.txt_titulo.text().strip() or "audiobook"
+        safe   = re.sub(r'[<>:"/\\|?*]', '', titulo).strip()
+        m4b_path = str(Path(self.output_folder) / f"{safe}.m4b")
+
+        cover = self.cover_data or extraer_portada(self.epub_path)
+        self.btn_export_m4b.setEnabled(False)
+        self.prog_m4b.setValue(0); self.prog_m4b.show()
+        self.status_m4b.show()
+        set_status(self.status_m4b, "⏳ Generando M4B…", "run")
+
+        self.m4b_worker = M4bWorker(
+            [str(f) for f in mp3s],
+            m4b_path,
+            metadata={
+                'titulo': self.txt_titulo.text().strip(),
+                'autor':  self.txt_autor.text().strip(),
+                'anyo':   self.txt_anyo.text().strip(),
+                'cover':  cover,
+            }
+        )
+        self.m4b_worker.progress.connect(self.prog_m4b.setValue)
+        self.m4b_worker.log.connect(lambda m: set_status(self.status_m4b, m, "run"))
+        self.m4b_worker.finished.connect(lambda p: (
+            set_status(self.status_m4b, f"✅ M4B guardado: {Path(p).name}", "ok"),
+            self.btn_export_m4b.setEnabled(True)
+        ))
+        self.m4b_worker.error.connect(lambda e: (
+            set_status(self.status_m4b, f"❌ {e[:120]}", "err"),
+            self.btn_export_m4b.setEnabled(True)
+        ))
+        self.m4b_worker.start()
+
+    # ── Project queue ──────────────────────────────────────────────────────────
+    def _add_to_queue(self):
+        voice_path = self.combo_voice.currentData() or ""
+        if not self.txt_files:
+            set_status(self.status_queue, "⚠ No hay capítulos TXT para encolar.", "err"); return
+        if not voice_path or not os.path.exists(voice_path):
+            set_status(self.status_queue, "⚠ Selecciona un modelo de voz válido.", "err"); return
+
+        proj = QueueProject(
+            book_path     = self.epub_path,
+            txt_folder    = self.txt_folder,
+            output_folder = self.output_folder or str(Path(self.txt_folder).parent / "output_mp3"),
+            voice_path    = voice_path,
+            speed         = self.slider_speed.value() / 100.0,
+            titulo        = self.txt_titulo.text().strip(),
+            autor         = self.txt_autor.text().strip(),
+            anyo          = self.txt_anyo.text().strip(),
+            normalize     = self.chk_normalize.isChecked(),
+            pausa_frase   = self.spin_pausa_frase.value(),
+            pausa_parrafo = self.spin_pausa_parrafo.value(),
+            cover         = self.cover_data or extraer_portada(self.epub_path),
+        )
+        self._queue.append(proj)
+        item = QListWidgetItem(f"📚  {proj.display_name()}  →  {proj.output_folder}")
+        self.queue_list.addItem(item)
+        self.btn_process_queue.setEnabled(True)
+        set_status(self.status_queue, f"{len(self._queue)} proyecto(s) en cola.", "ok")
+
+    def _remove_from_queue(self):
+        row = self.queue_list.currentRow()
+        if row < 0 or row >= len(self._queue): return
+        self._queue.pop(row)
+        self.queue_list.takeItem(row)
+        if not self._queue:
+            self.btn_process_queue.setEnabled(False)
+            set_status(self.status_queue, "Cola vacía.", "idle")
+        else:
+            set_status(self.status_queue, f"{len(self._queue)} proyecto(s) en cola.", "ok")
+
+    def _process_queue(self):
+        if not self._queue:
+            set_status(self.status_queue, "Cola vacía.", "warn"); return
+        self._queue_idx = 0
+        self.card_queue.set_state("active")
+        self._process_next_in_queue()
+
+    def _process_next_in_queue(self):
+        if self._queue_idx >= len(self._queue):
+            set_status(self.status_queue, f"✅ Cola completada — {len(self._queue)} proyecto(s).", "ok")
+            self.card_queue.set_state("done")
+            self._queue.clear()
+            self.queue_list.clear()
+            self.btn_process_queue.setEnabled(False)
+            return
+
+        proj = self._queue[self._queue_idx]
+        set_status(self.status_queue, f"⏳ Procesando {self._queue_idx+1}/{len(self._queue)}: {proj.display_name()}", "run")
+        self.queue_list.item(self._queue_idx).setText(
+            f"⏳  {proj.display_name()}"
+        )
+
+        txt_files = sorted(Path(proj.txt_folder).glob("*.txt"))
+        if not txt_files:
+            self._queue_idx += 1
+            self._process_next_in_queue()
+            return
+
+        os.makedirs(proj.output_folder, exist_ok=True)
+        self.audio_worker = AudioWorker(
+            [str(f) for f in txt_files],
+            proj.output_folder,
+            proj.voice_path,
+            proj.speed,
+            metadata={
+                'titulo': proj.titulo,
+                'autor':  proj.autor,
+                'anyo':   proj.anyo,
+                'cover':  proj.cover,
+            },
+            normalize     = proj.normalize,
+            pausa_frase   = proj.pausa_frase,
+            pausa_parrafo = proj.pausa_parrafo,
+            resume        = True,
+        )
+        self.audio_worker.finished.connect(self._on_queue_item_done)
+        self.audio_worker.error.connect(lambda e: set_status(self.status_queue, f"❌ {e[:120]}", "err"))
+        self.audio_worker.start()
+
+    def _on_queue_item_done(self):
+        if self._queue_idx < len(self._queue):
+            self.queue_list.item(self._queue_idx).setText(
+                f"✅  {self._queue[self._queue_idx].display_name()}"
+            )
+        self._queue_idx += 1
+        self._process_next_in_queue()
 
 
 # ══════════════════════════════════════════════════════════════════════════════
