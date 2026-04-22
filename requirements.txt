@@ -1,0 +1,9 @@
+PyQt6>=6.7.0
+ebooklib>=0.18
+beautifulsoup4>=4.12.0
+lxml>=5.0.0
+mutagen>=1.47.0
+piper-tts>=1.2.0
+kokoro>=0.9.4
+mobi>=0.3.3
+soundfile>=0.12.1

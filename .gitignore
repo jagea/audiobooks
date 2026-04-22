@@ -1,0 +1,32 @@
+# Voice models (large binary files — download separately)
+*.onnx
+*.bin
+
+# Claude Code internal
+.claude/
+
+# Generated audio output
+*.wav
+*.mp3
+app/books/
+
+# Book samples (copyrighted)
+samples/
+
+# App session state (contains local absolute paths)
+app/session.json
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+.venv/
+venv/
+*.egg-info/
+dist/
+build/
+
+# IDE
+.idea/
+.vscode/
+*.swp
