@@ -64,10 +64,10 @@ from PyQt6.QtWidgets import (
     QPushButton, QLabel, QFileDialog, QSlider, QProgressBar,
     QListWidget, QListWidgetItem, QFrame, QComboBox, QSizePolicy,
     QScrollArea, QLineEdit, QTextEdit, QCheckBox, QDoubleSpinBox,
-    QRadioButton, QButtonGroup, QStackedWidget
+    QButtonGroup, QStackedWidget, QTabWidget
 )
 from PyQt6.QtCore import Qt, QThread, pyqtSignal, QUrl
-from PyQt6.QtGui import QIntValidator
+from PyQt6.QtGui import QIntValidator, QPixmap
 
 
 # ── Qwen3-TTS constants ────────────────────────────────────────────────────────
@@ -303,6 +303,125 @@ QWidget#engine_panel {{
     background-color: {BG_ITEM};
     border: 1px solid {BORDER};
     border-radius: 8px;
+}}
+QTabWidget#main_tabs::pane {{
+    border: none;
+    background: {BG_DARK};
+}}
+QTabWidget#main_tabs > QTabBar {{
+    background: {BG_CARD};
+}}
+QTabBar::tab {{
+    background: {BG_CARD};
+    color: {TEXT_MUTED};
+    padding: 12px 28px;
+    font-size: 12px;
+    font-weight: bold;
+    letter-spacing: 1px;
+    border: none;
+    border-bottom: 2px solid transparent;
+    font-family: 'Georgia', 'Palatino Linotype', serif;
+}}
+QTabBar::tab:selected {{
+    color: {ACCENT};
+    border-bottom: 2px solid {ACCENT};
+    background: {BG_DARK};
+}}
+QTabBar::tab:hover:!selected {{
+    color: {TEXT_PRIMARY};
+    background: {BG_ITEM};
+}}
+QFrame#sidebar {{
+    background-color: {BG_CARD};
+    border-right: 1px solid {BORDER};
+}}
+QFrame#footer {{
+    background-color: {BG_CARD};
+    border-top: 1px solid {BORDER};
+}}
+QLabel#sidebar_title {{
+    font-size: 15px;
+    font-weight: bold;
+    color: {ACCENT};
+    letter-spacing: 2px;
+    font-family: 'Georgia', 'Palatino Linotype', serif;
+}}
+QLabel#sb_book_title {{
+    font-size: 12px;
+    font-weight: bold;
+    color: {TEXT_PRIMARY};
+    font-family: 'Georgia', 'Palatino Linotype', serif;
+}}
+QLabel#sb_book_meta {{
+    font-size: 10px;
+    color: {TEXT_MUTED};
+}}
+QLabel#cover_thumb {{
+    background-color: {BG_ITEM};
+    border: 1px solid {BORDER};
+    border-radius: 6px;
+    font-size: 36px;
+    color: {TEXT_MUTED};
+}}
+QListWidget#sidebar_list {{
+    background-color: {BG_DARK};
+    border: none;
+    border-radius: 0px;
+    padding: 2px;
+}}
+QListWidget#sidebar_list::item {{
+    padding: 6px 10px;
+    border-radius: 4px;
+    margin: 1px 0;
+    color: {TEXT_MUTED};
+    font-size: 11px;
+    font-family: 'Courier New', monospace;
+}}
+QListWidget#sidebar_list::item:selected {{
+    background-color: {BG_ITEM};
+    color: {TEXT_PRIMARY};
+}}
+QFrame#drop_zone {{
+    background-color: {BG_CARD};
+    border: 2px dashed {BORDER};
+    border-radius: 14px;
+}}
+QLabel#drop_title {{
+    font-size: 17px;
+    font-weight: bold;
+    color: {TEXT_PRIMARY};
+    font-family: 'Georgia', 'Palatino Linotype', serif;
+}}
+QLabel#drop_icon {{
+    font-size: 42px;
+}}
+QPushButton#engine_card {{
+    background-color: {BG_ITEM};
+    border: 1px solid {BORDER};
+    border-radius: 10px;
+    padding: 14px 6px;
+    color: {TEXT_MUTED};
+    font-size: 11px;
+    font-weight: bold;
+    text-align: center;
+    font-family: 'Georgia', 'Palatino Linotype', serif;
+}}
+QPushButton#engine_card:checked {{
+    background-color: {BG_CARD};
+    border: 2px solid {ACCENT};
+    color: {ACCENT};
+}}
+QPushButton#engine_card:hover:!checked {{
+    border-color: {ACCENT_DARK};
+    color: {TEXT_PRIMARY};
+}}
+QScrollArea#config_scroll {{
+    border: none;
+    border-right: 1px solid {BORDER};
+    background: transparent;
+}}
+QWidget#config_panel {{
+    background: transparent;
 }}
 """
 
@@ -1708,7 +1827,8 @@ class AudiobookApp(QMainWindow):
     def __init__(self):
         super().__init__()
         self.setWindowTitle("Generador de Audiolibros  v2.1")
-        self.setMinimumSize(720, 960)
+        self.setMinimumSize(1080, 680)
+        self.resize(1200, 820)
         self.setStyleSheet(STYLESHEET)
         self.setAcceptDrops(True)
         self.epub_path      = ""
@@ -1799,132 +1919,256 @@ class AudiobookApp(QMainWindow):
 
     # ── Build UI ──────────────────────────────────────────────────────────────
     def _build_ui(self):
-        scroll = QScrollArea()
-        scroll.setWidgetResizable(True)
-        self.setCentralWidget(scroll)
-        container = QWidget()
-        scroll.setWidget(container)
-        root = QVBoxLayout(container)
-        root.setContentsMargins(24, 24, 24, 24)
-        root.setSpacing(12)
+        central = QWidget()
+        self.setCentralWidget(central)
+        root = QVBoxLayout(central)
+        root.setContentsMargins(0, 0, 0, 0)
+        root.setSpacing(0)
 
-        title    = QLabel("📚 AUDIOLIBROS"); title.setObjectName("title")
-        subtitle = QLabel("AUDIOBOOK GENERATOR  v2.0"); subtitle.setObjectName("subtitle")
-        root.addWidget(title); root.addWidget(subtitle); root.addWidget(hline())
+        # ── Main horizontal area ──────────────────────────────────────────────
+        main_widget = QWidget()
+        main_h = QHBoxLayout(main_widget)
+        main_h.setContentsMargins(0, 0, 0, 0)
+        main_h.setSpacing(0)
 
-        # ── FASE 1 ──────────────────────────────────────────────────────────
-        self.card1 = PhaseCard(1, "Extraer y limpiar texto del libro")
-        self.card1.set_state("active")
+        # ── SIDEBAR ──────────────────────────────────────────────────────────
+        sidebar = QFrame()
+        sidebar.setObjectName("sidebar")
+        sidebar.setFixedWidth(230)
+        sb = QVBoxLayout(sidebar)
+        sb.setContentsMargins(14, 16, 14, 14)
+        sb.setSpacing(8)
 
-        self.card1.add_widget(section_label("Archivo de libro (EPUB / PDF / MOBI)  —  o arrastra aquí"))
-        row_epub = QHBoxLayout()
-        self.lbl_epub = QLabel("Sin seleccionar…"); self.lbl_epub.setObjectName("path_label")
-        self.lbl_epub.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
-        btn_epub = QPushButton("📁 Examinar"); btn_epub.setObjectName("browse_btn")
+        lbl_app = QLabel("🎵 AUDIOLIBROS")
+        lbl_app.setObjectName("sidebar_title")
+        sb.addWidget(lbl_app)
+
+        self.lbl_cover_thumb = QLabel("📖")
+        self.lbl_cover_thumb.setObjectName("cover_thumb")
+        self.lbl_cover_thumb.setFixedSize(202, 118)
+        self.lbl_cover_thumb.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        sb.addWidget(self.lbl_cover_thumb)
+
+        self.lbl_sb_title = QLabel("Sin libro cargado")
+        self.lbl_sb_title.setObjectName("sb_book_title")
+        self.lbl_sb_title.setWordWrap(True)
+        sb.addWidget(self.lbl_sb_title)
+
+        self.lbl_sb_meta = QLabel("")
+        self.lbl_sb_meta.setObjectName("sb_book_meta")
+        self.lbl_sb_meta.setWordWrap(True)
+        sb.addWidget(self.lbl_sb_meta)
+
+        sb.addWidget(hline())
+
+        self.lbl_sb_chapters = QLabel("CAPÍTULOS")
+        self.lbl_sb_chapters.setObjectName("section")
+        sb.addWidget(self.lbl_sb_chapters)
+
+        self.file_list = QListWidget()
+        self.file_list.setObjectName("sidebar_list")
+        self.file_list.currentItemChanged.connect(self._on_chapter_selected)
+        self.file_list.itemDoubleClicked.connect(self._on_chapter_double_clicked)
+        sb.addWidget(self.file_list, 1)
+
+        self.prog_audio = QProgressBar()
+        self.prog_audio.setValue(0)
+        sb.addWidget(self.prog_audio)
+
+        self.status3 = QLabel("En espera…")
+        self.status3.setObjectName("status_idle")
+        self.status3.setWordWrap(True)
+        sb.addWidget(self.status3)
+
+        main_h.addWidget(sidebar)
+
+        # ── TABS ─────────────────────────────────────────────────────────────
+        self._tabs = QTabWidget()
+        self._tabs.setObjectName("main_tabs")
+        main_h.addWidget(self._tabs, 1)
+
+        self._build_tab_extract()
+        self._build_tab_synthesize()
+        self._build_tab_queue()
+
+        root.addWidget(main_widget, 1)
+
+        # ── FOOTER PLAYER ────────────────────────────────────────────────────
+        footer = QFrame()
+        footer.setObjectName("footer")
+        footer.setFixedHeight(94)
+        ft = QVBoxLayout(footer)
+        ft.setContentsMargins(16, 6, 16, 6)
+        self.player = PlayerWidget()
+        ft.addWidget(self.player)
+        root.addWidget(footer)
+
+    # ── Tab: Extraer ──────────────────────────────────────────────────────────
+    def _build_tab_extract(self):
+        tab = QWidget()
+        lo = QVBoxLayout(tab)
+        lo.setContentsMargins(28, 24, 28, 24)
+        lo.setSpacing(14)
+
+        # Drop zone
+        dz = QFrame()
+        dz.setObjectName("drop_zone")
+        dz.setMinimumHeight(150)
+        dz_lo = QVBoxLayout(dz)
+        dz_lo.setSpacing(8)
+        dz_lo.setAlignment(Qt.AlignmentFlag.AlignCenter)
+
+        lbl_icon = QLabel("📖")
+        lbl_icon.setObjectName("drop_icon")
+        lbl_icon.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        lbl_dtitle = QLabel("Arrastra aquí tu libro")
+        lbl_dtitle.setObjectName("drop_title")
+        lbl_dtitle.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        lbl_dfmt = QLabel("EPUB  ·  PDF  ·  MOBI")
+        lbl_dfmt.setObjectName("section")
+        lbl_dfmt.setAlignment(Qt.AlignmentFlag.AlignCenter)
+
+        row_browse = QHBoxLayout()
+        row_browse.setSpacing(8)
+        row_browse.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.lbl_epub = QLabel("Sin seleccionar…")
+        self.lbl_epub.setObjectName("status_idle")
+        btn_epub = QPushButton("📁 Examinar")
+        btn_epub.setObjectName("browse_btn")
         btn_epub.clicked.connect(self._pick_epub)
-        row_epub.addWidget(self.lbl_epub); row_epub.addWidget(btn_epub)
-        self.card1.add_layout(row_epub)
+        row_browse.addWidget(self.lbl_epub)
+        row_browse.addWidget(btn_epub)
 
-        self.card1.add_widget(section_label("Carpeta donde guardar los TXT"))
+        dz_lo.addWidget(lbl_icon)
+        dz_lo.addWidget(lbl_dtitle)
+        dz_lo.addWidget(lbl_dfmt)
+        dz_lo.addLayout(row_browse)
+        lo.addWidget(dz)
+
+        # TXT folder row
         row_txt = QHBoxLayout()
-        self.lbl_txt = QLabel("Sin seleccionar…"); self.lbl_txt.setObjectName("path_label")
+        row_txt.setSpacing(8)
+        row_txt.addWidget(section_label("Guardar TXT en:"))
+        self.lbl_txt = QLabel("Sin seleccionar…")
+        self.lbl_txt.setObjectName("path_label")
         self.lbl_txt.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
-        btn_txt = QPushButton("📁 Examinar"); btn_txt.setObjectName("browse_btn")
+        btn_txt = QPushButton("📁 Examinar")
+        btn_txt.setObjectName("browse_btn")
         btn_txt.clicked.connect(self._pick_txt_folder)
-        row_txt.addWidget(self.lbl_txt); row_txt.addWidget(btn_txt)
-        self.card1.add_layout(row_txt)
+        row_txt.addWidget(self.lbl_txt, 1)
+        row_txt.addWidget(btn_txt)
+        lo.addLayout(row_txt)
 
+        # Extraction log
+        lo.addWidget(section_label("Registro de extracción"))
         self.list_extract = QListWidget()
-        self.list_extract.setMinimumHeight(90); self.list_extract.setMaximumHeight(130)
-        self.list_extract.hide()
-        self.card1.add_widget(self.list_extract)
+        lo.addWidget(self.list_extract, 1)
 
-        self.prog_extract = QProgressBar(); self.prog_extract.setValue(0)
-        self.prog_extract.hide()
-        self.card1.add_widget(self.prog_extract)
+        self.prog_extract = QProgressBar()
+        self.prog_extract.setValue(0)
+        lo.addWidget(self.prog_extract)
 
         self.status1 = QLabel("Selecciona un archivo y una carpeta de destino.")
         self.status1.setObjectName("status_idle")
-        self.card1.add_widget(self.status1)
+        lo.addWidget(self.status1)
 
         self.btn_extract = QPushButton("▶  EXTRAER Y LIMPIAR TEXTO")
         self.btn_extract.setObjectName("primary_btn")
         self.btn_extract.clicked.connect(self._start_extract)
-        self.card1.add_widget(self.btn_extract)
+        lo.addWidget(self.btn_extract)
 
-        root.addWidget(self.card1)
+        self._tabs.addTab(tab, "①  Extraer")
 
-        # ── FASE 2 ──────────────────────────────────────────────────────────
-        self.card3 = PhaseCard(2, "Generar audiolibro en MP3")
-        self.card3.set_state("idle")
+    # ── Tab: Sintetizar ───────────────────────────────────────────────────────
+    def _build_tab_synthesize(self):
+        tab = QWidget()
+        split_lo = QHBoxLayout(tab)
+        split_lo.setContentsMargins(0, 0, 0, 0)
+        split_lo.setSpacing(0)
 
-        self.card3.add_widget(section_label("Carpeta de salida (MP3)"))
-        row_out = QHBoxLayout()
-        self.lbl_output = QLabel("Sin seleccionar…"); self.lbl_output.setObjectName("path_label")
-        self.lbl_output.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
-        btn_out = QPushButton("📁 Examinar"); btn_out.setObjectName("browse_btn")
-        btn_out.clicked.connect(self._pick_output)
-        row_out.addWidget(self.lbl_output); row_out.addWidget(btn_out)
-        self.card3.add_layout(row_out)
+        # ── LEFT: config scrollable panel ────────────────────────────────────
+        left_scroll = QScrollArea()
+        left_scroll.setWidgetResizable(True)
+        left_scroll.setFixedWidth(380)
+        left_scroll.setObjectName("config_scroll")
+        left_w = QWidget()
+        left_w.setObjectName("config_panel")
+        left_lo = QVBoxLayout(left_w)
+        left_lo.setContentsMargins(20, 20, 20, 20)
+        left_lo.setSpacing(12)
+        left_scroll.setWidget(left_w)
 
-        # ── Motor de síntesis ──────────────────────────────────────────────
-        self.card3.add_widget(section_label("Motor de síntesis"))
-        row_eng = QHBoxLayout(); row_eng.setSpacing(20)
+        # Engine cards
+        left_lo.addWidget(section_label("Motor de síntesis"))
+        cards_row = QHBoxLayout()
+        cards_row.setSpacing(8)
         self._engine_group = QButtonGroup(self)
-        self.radio_piper      = QRadioButton("🦜  Piper  (local · CPU · .onnx)")
-        self.radio_qwen_local = QRadioButton("🔮  Qwen3-TTS  (local · GPU)")
-        self.radio_qwen_api   = QRadioButton("☁️  Qwen3-TTS  (API · DashScope)")
+        self.radio_piper = QPushButton("🦜\nPiper\nCPU · local")
+        self.radio_qwen_local = QPushButton("🔮\nQwen3-TTS\nGPU · local")
+        self.radio_qwen_api = QPushButton("☁️\nQwen3-TTS\nAPI · nube")
+        for btn in [self.radio_piper, self.radio_qwen_local, self.radio_qwen_api]:
+            btn.setObjectName("engine_card")
+            btn.setCheckable(True)
+            self._engine_group.addButton(btn)
+            cards_row.addWidget(btn)
         self.radio_piper.setChecked(True)
-        for r in [self.radio_piper, self.radio_qwen_local, self.radio_qwen_api]:
-            self._engine_group.addButton(r)
-            row_eng.addWidget(r)
-        row_eng.addStretch()
-        self.card3.add_layout(row_eng)
+        left_lo.addLayout(cards_row)
 
-        # ── Panel Piper ────────────────────────────────────────────────────
-        self.piper_panel = QWidget(); self.piper_panel.setObjectName("engine_panel")
-        pp_layout = QVBoxLayout(self.piper_panel); pp_layout.setContentsMargins(10, 8, 10, 8)
-        pp_layout.addWidget(section_label("Voz Piper"))
-        row_voice = QHBoxLayout(); row_voice.setSpacing(8)
-        self.combo_voice = QComboBox(); self._populate_voices()
+        # ── Piper panel ───────────────────────────────────────────────────────
+        self.piper_panel = QWidget()
+        self.piper_panel.setObjectName("engine_panel")
+        pp_lo = QVBoxLayout(self.piper_panel)
+        pp_lo.setContentsMargins(10, 8, 10, 8)
+        pp_lo.addWidget(section_label("Voz Piper"))
+        row_voice = QHBoxLayout()
+        row_voice.setSpacing(8)
+        self.combo_voice = QComboBox()
         self.combo_voice.currentIndexChanged.connect(self._on_voice_changed)
-        self.lbl_quality = QLabel(""); self.lbl_quality.setFixedWidth(46)
-        self.btn_preview_voice = QPushButton("▶ Probar"); self.btn_preview_voice.setObjectName("browse_btn")
+        self.lbl_quality = QLabel("")
+        self.lbl_quality.setFixedWidth(46)
+        self.btn_preview_voice = QPushButton("▶ Probar")
+        self.btn_preview_voice.setObjectName("browse_btn")
         self.btn_preview_voice.clicked.connect(self._preview_voice)
         row_voice.addWidget(self.combo_voice, 1)
         row_voice.addWidget(self.lbl_quality)
         row_voice.addWidget(self.btn_preview_voice)
-        pp_layout.addLayout(row_voice)
-        self.card3.add_widget(self.piper_panel)
-        self._on_voice_changed()
+        pp_lo.addLayout(row_voice)
 
-        # ── Panel Qwen Local ───────────────────────────────────────────────
-        self.qwen_local_panel = QWidget(); self.qwen_local_panel.setObjectName("engine_panel")
-        ql_layout = QVBoxLayout(self.qwen_local_panel); ql_layout.setContentsMargins(10, 8, 10, 8); ql_layout.setSpacing(8)
+        # ── Qwen Local panel ──────────────────────────────────────────────────
+        self.qwen_local_panel = QWidget()
+        self.qwen_local_panel.setObjectName("engine_panel")
+        ql_lo = QVBoxLayout(self.qwen_local_panel)
+        ql_lo.setContentsMargins(10, 8, 10, 8)
+        ql_lo.setSpacing(8)
 
-        ql_r1 = QHBoxLayout(); ql_r1.setSpacing(10)
+        ql_r1 = QHBoxLayout()
+        ql_r1.setSpacing(10)
         ql_r1.addWidget(section_label("Modelo"))
         self.combo_qwen_model = QComboBox()
-        for k in QWEN_LOCAL_MODELS: self.combo_qwen_model.addItem(k, QWEN_LOCAL_MODELS[k])
+        for k in QWEN_LOCAL_MODELS:
+            self.combo_qwen_model.addItem(k, QWEN_LOCAL_MODELS[k])
         ql_r1.addWidget(self.combo_qwen_model, 2)
         ql_r1.addWidget(section_label("Idioma"))
         self.combo_qwen_lang = QComboBox()
-        for lang in QWEN_LOCAL_LANGS: self.combo_qwen_lang.addItem(lang)
+        for lang in QWEN_LOCAL_LANGS:
+            self.combo_qwen_lang.addItem(lang)
         ql_r1.addWidget(self.combo_qwen_lang, 1)
-        ql_layout.addLayout(ql_r1)
+        ql_lo.addLayout(ql_r1)
 
-        ql_r2 = QHBoxLayout(); ql_r2.setSpacing(10)
+        ql_r2 = QHBoxLayout()
+        ql_r2.setSpacing(10)
         ql_r2.addWidget(section_label("Voz"))
         self.combo_qwen_speaker = QComboBox()
-        for v in QWEN_LOCAL_VOICES: self.combo_qwen_speaker.addItem(v)
+        for v in QWEN_LOCAL_VOICES:
+            self.combo_qwen_speaker.addItem(v)
         ql_r2.addWidget(self.combo_qwen_speaker, 1)
-        self.btn_qwen_preview = QPushButton("▶ Probar"); self.btn_qwen_preview.setObjectName("browse_btn")
+        self.btn_qwen_preview = QPushButton("▶ Probar")
+        self.btn_qwen_preview.setObjectName("browse_btn")
         self.btn_qwen_preview.clicked.connect(self._preview_qwen_voice)
         ql_r2.addWidget(self.btn_qwen_preview)
-        ql_layout.addLayout(ql_r2)
+        ql_lo.addLayout(ql_r2)
 
-        lbl_inst = section_label("Instrucción de voz  (opcional — describe el estilo o usa 'Voice Design')")
-        ql_layout.addWidget(lbl_inst)
+        ql_lo.addWidget(section_label("Instrucción de voz  (opcional — describe el estilo o usa 'Voice Design')"))
         self.txt_qwen_instruct = QLineEdit()
         self.txt_qwen_instruct.setPlaceholderText(
             "Ej: «Narrate with a calm, engaging storytelling tone, slightly warm and expressive.»"
@@ -1933,35 +2177,42 @@ class AudiobookApp(QMainWindow):
             f"QLineEdit {{ background:{BG_DARK}; border:1px solid {BORDER}; border-radius:6px; "
             f"padding:7px 10px; color:{TEXT_PRIMARY}; font-size:12px; }}"
         )
-        ql_layout.addWidget(self.txt_qwen_instruct)
+        ql_lo.addWidget(self.txt_qwen_instruct)
 
-        lbl_clone = section_label("Clonación de voz  (modo Clone: audio de referencia + transcripción)")
-        ql_layout.addWidget(lbl_clone)
-        ql_r3 = QHBoxLayout(); ql_r3.setSpacing(8)
-        self.lbl_qwen_ref = QLabel("Sin referencia (modo Custom/Design)"); self.lbl_qwen_ref.setObjectName("path_label")
+        ql_lo.addWidget(section_label("Clonación de voz  (modo Clone: audio de referencia + transcripción)"))
+        ql_r3 = QHBoxLayout()
+        ql_r3.setSpacing(8)
+        self.lbl_qwen_ref = QLabel("Sin referencia (modo Custom/Design)")
+        self.lbl_qwen_ref.setObjectName("path_label")
         self.lbl_qwen_ref.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
-        btn_ref = QPushButton("🎙 Seleccionar WAV"); btn_ref.setObjectName("browse_btn")
+        btn_ref = QPushButton("🎙 Seleccionar WAV")
+        btn_ref.setObjectName("browse_btn")
         btn_ref.clicked.connect(self._pick_clone_ref)
-        btn_clear_ref = QPushButton("✕"); btn_clear_ref.setObjectName("browse_btn"); btn_clear_ref.setFixedWidth(32)
+        btn_clear_ref = QPushButton("✕")
+        btn_clear_ref.setObjectName("browse_btn")
+        btn_clear_ref.setFixedWidth(32)
         btn_clear_ref.clicked.connect(self._clear_clone_ref)
-        ql_r3.addWidget(self.lbl_qwen_ref); ql_r3.addWidget(btn_ref); ql_r3.addWidget(btn_clear_ref)
-        ql_layout.addLayout(ql_r3)
+        ql_r3.addWidget(self.lbl_qwen_ref)
+        ql_r3.addWidget(btn_ref)
+        ql_r3.addWidget(btn_clear_ref)
+        ql_lo.addLayout(ql_r3)
         self.txt_qwen_ref_text = QLineEdit()
         self.txt_qwen_ref_text.setPlaceholderText("Transcripción exacta del audio de referencia…")
         self.txt_qwen_ref_text.setStyleSheet(
             f"QLineEdit {{ background:{BG_DARK}; border:1px solid {BORDER}; border-radius:6px; "
             f"padding:7px 10px; color:{TEXT_MUTED}; font-size:11px; }}"
         )
-        ql_layout.addWidget(self.txt_qwen_ref_text)
+        ql_lo.addWidget(self.txt_qwen_ref_text)
 
-        self.qwen_local_panel.hide()
-        self.card3.add_widget(self.qwen_local_panel)
+        # ── Qwen API panel ────────────────────────────────────────────────────
+        self.qwen_api_panel = QWidget()
+        self.qwen_api_panel.setObjectName("engine_panel")
+        qa_lo = QVBoxLayout(self.qwen_api_panel)
+        qa_lo.setContentsMargins(10, 8, 10, 8)
+        qa_lo.setSpacing(8)
 
-        # ── Panel Qwen API ─────────────────────────────────────────────────
-        self.qwen_api_panel = QWidget(); self.qwen_api_panel.setObjectName("engine_panel")
-        qa_layout = QVBoxLayout(self.qwen_api_panel); qa_layout.setContentsMargins(10, 8, 10, 8); qa_layout.setSpacing(8)
-
-        qa_r1 = QHBoxLayout(); qa_r1.setSpacing(10)
+        qa_r1 = QHBoxLayout()
+        qa_r1.setSpacing(10)
         qa_r1.addWidget(section_label("Clave API"))
         self.txt_api_key = QLineEdit()
         self.txt_api_key.setPlaceholderText("DASHSCOPE_API_KEY  (o variable de entorno)")
@@ -1972,33 +2223,38 @@ class AudiobookApp(QMainWindow):
             f"padding:7px 10px; color:{TEXT_PRIMARY}; font-size:12px; font-family:'Courier New'; }}"
         )
         qa_r1.addWidget(self.txt_api_key, 1)
-        qa_layout.addLayout(qa_r1)
+        qa_lo.addLayout(qa_r1)
 
-        qa_r2 = QHBoxLayout(); qa_r2.setSpacing(10)
+        qa_r2 = QHBoxLayout()
+        qa_r2.setSpacing(10)
         qa_r2.addWidget(section_label("Modelo"))
         self.combo_api_model = QComboBox()
-        for m in QWEN_API_MODELS: self.combo_api_model.addItem(m)
+        for m in QWEN_API_MODELS:
+            self.combo_api_model.addItem(m)
         qa_r2.addWidget(self.combo_api_model, 1)
         qa_r2.addWidget(section_label("Voz"))
         self.combo_api_voice = QComboBox()
-        for v in QWEN_API_VOICES: self.combo_api_voice.addItem(v)
+        for v in QWEN_API_VOICES:
+            self.combo_api_voice.addItem(v)
         qa_r2.addWidget(self.combo_api_voice, 1)
         qa_r2.addWidget(section_label("Idioma"))
         self.combo_api_lang = QComboBox()
-        for lang in QWEN_API_LANGS: self.combo_api_lang.addItem(lang)
+        for lang in QWEN_API_LANGS:
+            self.combo_api_lang.addItem(lang)
         qa_r2.addWidget(self.combo_api_lang, 1)
-        qa_layout.addLayout(qa_r2)
+        qa_lo.addLayout(qa_r2)
 
-        self.qwen_api_panel.hide()
-        self.card3.add_widget(self.qwen_api_panel)
+        # Engine stack (replaces show/hide)
+        self._engine_stack = QStackedWidget()
+        self._engine_stack.addWidget(self.piper_panel)       # 0
+        self._engine_stack.addWidget(self.qwen_local_panel)  # 1
+        self._engine_stack.addWidget(self.qwen_api_panel)    # 2
+        left_lo.addWidget(self._engine_stack)
 
-        # Conectar radio buttons → mostrar panel correcto
-        self.radio_piper.toggled.connect(self._on_engine_changed)
-        self.radio_qwen_local.toggled.connect(self._on_engine_changed)
-        self.radio_qwen_api.toggled.connect(self._on_engine_changed)
+        left_lo.addWidget(hline())
 
-        # ── Metadatos ──────────────────────────────────────────────────────
-        self.card3.add_widget(section_label("Metadatos del audiolibro"))
+        # Metadata
+        left_lo.addWidget(section_label("Metadatos del audiolibro"))
         meta_style = f"""
             QLineEdit {{
                 background-color: {BG_ITEM}; border: 1px solid {BORDER};
@@ -2008,12 +2264,16 @@ class AudiobookApp(QMainWindow):
             }}
             QLineEdit:focus {{ border-color: {ACCENT_DARK}; }}
         """
-        row_meta = QHBoxLayout(); row_meta.setSpacing(10)
-        self.txt_titulo = QLineEdit(); self.txt_titulo.setPlaceholderText("Título del libro")
-        self.txt_autor  = QLineEdit(); self.txt_autor.setPlaceholderText("Autor")
-        self.txt_anyo   = QLineEdit(); self.txt_anyo.setPlaceholderText("Año")
+        row_meta = QHBoxLayout()
+        row_meta.setSpacing(8)
+        self.txt_titulo = QLineEdit()
+        self.txt_titulo.setPlaceholderText("Título del libro")
+        self.txt_autor = QLineEdit()
+        self.txt_autor.setPlaceholderText("Autor")
+        self.txt_anyo = QLineEdit()
+        self.txt_anyo.setPlaceholderText("Año")
         self.txt_anyo.setValidator(QIntValidator(1000, 2099))
-        self.txt_anyo.setFixedWidth(80)
+        self.txt_anyo.setFixedWidth(72)
         for w in [self.txt_titulo, self.txt_autor, self.txt_anyo]:
             w.setStyleSheet(meta_style)
         self.txt_titulo.textChanged.connect(self._on_title_changed)
@@ -2021,100 +2281,123 @@ class AudiobookApp(QMainWindow):
         self.txt_anyo.textChanged.connect(self._save_session)
         row_meta.addWidget(self.txt_titulo, 3)
         row_meta.addWidget(self.txt_autor, 2)
-        row_meta.addWidget(self.txt_anyo, 1)
-        self.card3.add_layout(row_meta)
+        row_meta.addWidget(self.txt_anyo)
+        left_lo.addLayout(row_meta)
 
-        self.card3.add_widget(section_label("Portada"))
-        row_cover = QHBoxLayout(); row_cover.setSpacing(10)
+        # Cover
+        row_cover = QHBoxLayout()
+        row_cover.setSpacing(8)
         self.lbl_cover = QLabel("Se intentará extraer del libro automáticamente.")
         self.lbl_cover.setObjectName("path_label")
         self.lbl_cover.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
-        self.btn_cover = QPushButton("🖼 Seleccionar"); self.btn_cover.setObjectName("browse_btn")
+        self.btn_cover = QPushButton("🖼 Portada")
+        self.btn_cover.setObjectName("browse_btn")
         self.btn_cover.clicked.connect(self._pick_cover)
-        btn_clear_cover = QPushButton("✕"); btn_clear_cover.setObjectName("browse_btn")
+        btn_clear_cover = QPushButton("✕")
+        btn_clear_cover.setObjectName("browse_btn")
         btn_clear_cover.setFixedWidth(32)
         btn_clear_cover.clicked.connect(self._clear_cover)
         row_cover.addWidget(self.lbl_cover)
         row_cover.addWidget(self.btn_cover)
         row_cover.addWidget(btn_clear_cover)
-        self.card3.add_layout(row_cover)
+        left_lo.addLayout(row_cover)
 
-        # Velocidad
-        self.card3.add_widget(section_label("Velocidad de narración"))
+        left_lo.addWidget(hline())
+
+        # Speed
+        left_lo.addWidget(section_label("Velocidad de narración"))
         row_spd = QHBoxLayout()
         self.slider_speed = QSlider(Qt.Orientation.Horizontal)
-        self.slider_speed.setRange(70, 150); self.slider_speed.setValue(100)
-        self.lbl_speed = QLabel("1.00×"); self.lbl_speed.setObjectName("speed_val")
+        self.slider_speed.setRange(70, 150)
+        self.slider_speed.setValue(100)
+        self.lbl_speed = QLabel("1.00×")
+        self.lbl_speed.setObjectName("speed_val")
         self.slider_speed.valueChanged.connect(lambda v: (
             self.lbl_speed.setText(f"{v/100:.2f}×"), self._save_session()
         ))
-        row_spd.addWidget(self.slider_speed); row_spd.addWidget(self.lbl_speed)
-        self.card3.add_layout(row_spd)
+        row_spd.addWidget(self.slider_speed)
+        row_spd.addWidget(self.lbl_speed)
+        left_lo.addLayout(row_spd)
 
-        # ── Pausas ajustables ──────────────────────────────────────────────
-        self.card3.add_widget(section_label("Pausas"))
-        row_pausa = QHBoxLayout(); row_pausa.setSpacing(14)
-
-        lbl_pf = QLabel("Entre frases:"); lbl_pf.setObjectName("section")
+        # Pauses
+        left_lo.addWidget(section_label("Pausas"))
+        row_pausa = QHBoxLayout()
+        row_pausa.setSpacing(10)
+        lbl_pf = QLabel("Frases:")
+        lbl_pf.setObjectName("section")
         self.spin_pausa_frase = QDoubleSpinBox()
-        self.spin_pausa_frase.setRange(0.10, 2.0); self.spin_pausa_frase.setValue(0.55)
-        self.spin_pausa_frase.setSingleStep(0.05); self.spin_pausa_frase.setSuffix(" s")
-        self.spin_pausa_frase.setDecimals(2); self.spin_pausa_frase.setFixedWidth(90)
+        self.spin_pausa_frase.setRange(0.10, 2.0)
+        self.spin_pausa_frase.setValue(0.55)
+        self.spin_pausa_frase.setSingleStep(0.05)
+        self.spin_pausa_frase.setSuffix(" s")
+        self.spin_pausa_frase.setDecimals(2)
+        self.spin_pausa_frase.setFixedWidth(90)
         self.spin_pausa_frase.valueChanged.connect(self._save_session)
-
-        lbl_pp = QLabel("Entre párrafos:"); lbl_pp.setObjectName("section")
+        lbl_pp = QLabel("Párrafos:")
+        lbl_pp.setObjectName("section")
         self.spin_pausa_parrafo = QDoubleSpinBox()
-        self.spin_pausa_parrafo.setRange(0.20, 4.0); self.spin_pausa_parrafo.setValue(1.20)
-        self.spin_pausa_parrafo.setSingleStep(0.05); self.spin_pausa_parrafo.setSuffix(" s")
-        self.spin_pausa_parrafo.setDecimals(2); self.spin_pausa_parrafo.setFixedWidth(90)
+        self.spin_pausa_parrafo.setRange(0.20, 4.0)
+        self.spin_pausa_parrafo.setValue(1.20)
+        self.spin_pausa_parrafo.setSingleStep(0.05)
+        self.spin_pausa_parrafo.setSuffix(" s")
+        self.spin_pausa_parrafo.setDecimals(2)
+        self.spin_pausa_parrafo.setFixedWidth(90)
         self.spin_pausa_parrafo.valueChanged.connect(self._save_session)
-
-        row_pausa.addWidget(lbl_pf); row_pausa.addWidget(self.spin_pausa_frase)
-        row_pausa.addSpacing(10)
-        row_pausa.addWidget(lbl_pp); row_pausa.addWidget(self.spin_pausa_parrafo)
+        row_pausa.addWidget(lbl_pf)
+        row_pausa.addWidget(self.spin_pausa_frase)
+        row_pausa.addWidget(lbl_pp)
+        row_pausa.addWidget(self.spin_pausa_parrafo)
         row_pausa.addStretch()
-        self.card3.add_layout(row_pausa)
+        left_lo.addLayout(row_pausa)
 
-        # ── Opciones: normalizar + resume ──────────────────────────────────
-        row_opts = QHBoxLayout(); row_opts.setSpacing(20)
+        # Options
+        row_opts = QHBoxLayout()
+        row_opts.setSpacing(16)
         self.chk_normalize = QCheckBox("Normalizar volumen (LUFS -16)")
         self.chk_normalize.setChecked(True)
         self.chk_normalize.stateChanged.connect(self._save_session)
-        self.chk_resume = QCheckBox("Reanudar (omitir capítulos ya generados)")
+        self.chk_resume = QCheckBox("Reanudar")
         self.chk_resume.setChecked(False)
         row_opts.addWidget(self.chk_normalize)
         row_opts.addWidget(self.chk_resume)
         row_opts.addStretch()
-        self.card3.add_layout(row_opts)
+        left_lo.addLayout(row_opts)
 
-        # Archivos
-        self.card3.add_widget(section_label("Archivos a procesar  (doble clic = reproducir)"))
-        self.file_list = QListWidget()
-        self.file_list.setMinimumHeight(100); self.file_list.setMaximumHeight(150)
-        self.file_list.currentItemChanged.connect(self._on_chapter_selected)
-        self.file_list.itemDoubleClicked.connect(self._on_chapter_double_clicked)
-        self.card3.add_widget(self.file_list)
+        left_lo.addStretch()
+        split_lo.addWidget(left_scroll)
 
-        # Chapter preview
-        self.card3.add_widget(section_label("Vista previa del capítulo"))
+        # ── RIGHT: preview + output + actions ────────────────────────────────
+        right_w = QWidget()
+        right_w.setObjectName("config_panel")
+        right_lo = QVBoxLayout(right_w)
+        right_lo.setContentsMargins(20, 20, 20, 20)
+        right_lo.setSpacing(12)
+
+        right_lo.addWidget(section_label("Capítulo seleccionado"))
         self.chapter_preview = QTextEdit()
         self.chapter_preview.setReadOnly(True)
-        self.chapter_preview.setMaximumHeight(110)
-        self.chapter_preview.setPlaceholderText("Selecciona un capítulo para ver una vista previa…")
-        self.card3.add_widget(self.chapter_preview)
+        self.chapter_preview.setPlaceholderText(
+            "Selecciona un capítulo en la barra lateral para ver el texto…"
+        )
+        right_lo.addWidget(self.chapter_preview, 1)
 
-        # ── Reproductor integrado ──────────────────────────────────────────
-        self.card3.add_widget(section_label("Reproductor"))
-        self.player = PlayerWidget()
-        self.card3.add_widget(self.player)
+        right_lo.addWidget(hline())
 
-        self.prog_audio = QProgressBar(); self.prog_audio.setValue(0)
-        self.card3.add_widget(self.prog_audio)
+        right_lo.addWidget(section_label("Carpeta de salida (MP3)"))
+        row_out = QHBoxLayout()
+        row_out.setSpacing(8)
+        self.lbl_output = QLabel("Sin seleccionar…")
+        self.lbl_output.setObjectName("path_label")
+        self.lbl_output.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
+        btn_out = QPushButton("📁 Examinar")
+        btn_out.setObjectName("browse_btn")
+        btn_out.clicked.connect(self._pick_output)
+        row_out.addWidget(self.lbl_output, 1)
+        row_out.addWidget(btn_out)
+        right_lo.addLayout(row_out)
 
-        self.status3 = QLabel("En espera…"); self.status3.setObjectName("status_idle")
-        self.card3.add_widget(self.status3)
-
-        row3 = QHBoxLayout(); row3.setSpacing(10)
+        row3 = QHBoxLayout()
+        row3.setSpacing(10)
         self.btn_generate = QPushButton("▶  GENERAR AUDIOLIBRO")
         self.btn_generate.setObjectName("primary_btn")
         self.btn_generate.clicked.connect(self._start_audio)
@@ -2130,39 +2413,49 @@ class AudiobookApp(QMainWindow):
         row3.addWidget(self.btn_generate)
         row3.addWidget(self.btn_stop)
         row3.addWidget(self.btn_open_folder)
-        self.card3.add_layout(row3)
+        right_lo.addLayout(row3)
 
-        # ── Exportar M4B ──────────────────────────────────────────────────
         self.btn_export_m4b = QPushButton("📦  EXPORTAR COMO M4B")
         self.btn_export_m4b.setObjectName("secondary_btn")
         self.btn_export_m4b.clicked.connect(self._export_m4b)
         self.btn_export_m4b.hide()
-        self.card3.add_widget(self.btn_export_m4b)
-
-        self.prog_m4b = QProgressBar(); self.prog_m4b.setValue(0)
+        right_lo.addWidget(self.btn_export_m4b)
+        self.prog_m4b = QProgressBar()
+        self.prog_m4b.setValue(0)
         self.prog_m4b.hide()
-        self.card3.add_widget(self.prog_m4b)
-
-        self.status_m4b = QLabel(""); self.status_m4b.setObjectName("status_idle")
+        right_lo.addWidget(self.prog_m4b)
+        self.status_m4b = QLabel("")
+        self.status_m4b.setObjectName("status_idle")
         self.status_m4b.hide()
-        self.card3.add_widget(self.status_m4b)
+        right_lo.addWidget(self.status_m4b)
 
-        root.addWidget(self.card3)
+        split_lo.addWidget(right_w, 1)
 
-        # ── COLA DE PROYECTOS ────────────────────────────────────────────
-        self.card_queue = PhaseCard(3, "Cola de proyectos")
-        self.card_queue.set_state("idle")
+        # Wire engine buttons
+        for btn in [self.radio_piper, self.radio_qwen_local, self.radio_qwen_api]:
+            btn.toggled.connect(self._on_engine_changed)
 
-        self.card_queue.add_widget(section_label("Proyectos en cola"))
+        self._populate_voices()
+        self._on_voice_changed()
+        self._tabs.addTab(tab, "②  Sintetizar")
+
+    # ── Tab: Cola ─────────────────────────────────────────────────────────────
+    def _build_tab_queue(self):
+        tab = QWidget()
+        lo = QVBoxLayout(tab)
+        lo.setContentsMargins(28, 24, 28, 24)
+        lo.setSpacing(14)
+
+        lo.addWidget(section_label("Proyectos en cola"))
         self.queue_list = QListWidget()
-        self.queue_list.setMinimumHeight(70); self.queue_list.setMaximumHeight(120)
-        self.card_queue.add_widget(self.queue_list)
+        lo.addWidget(self.queue_list, 1)
 
         self.status_queue = QLabel("Cola vacía. Configura un proyecto y usa 'Añadir a cola'.")
         self.status_queue.setObjectName("status_idle")
-        self.card_queue.add_widget(self.status_queue)
+        lo.addWidget(self.status_queue)
 
-        row_q = QHBoxLayout(); row_q.setSpacing(10)
+        row_q = QHBoxLayout()
+        row_q.setSpacing(10)
         self.btn_add_queue = QPushButton("➕  AÑADIR A COLA")
         self.btn_add_queue.setObjectName("secondary_btn")
         self.btn_add_queue.clicked.connect(self._add_to_queue)
@@ -2176,10 +2469,37 @@ class AudiobookApp(QMainWindow):
         row_q.addWidget(self.btn_add_queue)
         row_q.addWidget(self.btn_remove_queue)
         row_q.addWidget(self.btn_process_queue)
-        self.card_queue.add_layout(row_q)
+        lo.addLayout(row_q)
 
-        root.addWidget(self.card_queue)
-        root.addStretch()
+        self._tabs.addTab(tab, "③  Cola")
+
+    # ── Sidebar book info ─────────────────────────────────────────────────────
+    def _update_sidebar_book_info(self):
+        titulo = self.txt_titulo.text().strip() if hasattr(self, 'txt_titulo') else ""
+        autor  = self.txt_autor.text().strip()  if hasattr(self, 'txt_autor')  else ""
+        anyo   = self.txt_anyo.text().strip()   if hasattr(self, 'txt_anyo')   else ""
+        ext    = Path(self.epub_path).suffix.upper().lstrip('.') if self.epub_path else ""
+
+        self.lbl_sb_title.setText(titulo or Path(self.epub_path).stem if self.epub_path else "Sin libro cargado")
+        parts = [p for p in [autor, anyo, ext] if p]
+        self.lbl_sb_meta.setText("  ·  ".join(parts))
+
+        # Cover thumbnail
+        cover = self.cover_data or (extraer_portada(self.epub_path) if self.epub_path else None)
+        if cover:
+            try:
+                pix = QPixmap()
+                pix.loadFromData(cover)
+                self.lbl_cover_thumb.setPixmap(
+                    pix.scaled(202, 118, Qt.AspectRatioMode.KeepAspectRatio,
+                               Qt.TransformationMode.SmoothTransformation)
+                )
+                self.lbl_cover_thumb.setText("")
+            except Exception:
+                self.lbl_cover_thumb.setText("📖")
+        else:
+            self.lbl_cover_thumb.setText("📖")
+            self.lbl_cover_thumb.setPixmap(QPixmap())
 
     # ── Voice helpers ─────────────────────────────────────────────────────────
     def _populate_voices(self):
@@ -2307,10 +2627,12 @@ class AudiobookApp(QMainWindow):
             if meta['anyo'] and not self.txt_anyo.text():
                 self.txt_anyo.setText(meta['anyo'])
         self._save_session()
+        self._update_sidebar_book_info()
 
     def _on_title_changed(self, _text):
         self._suggest_output_folder()
         self._save_session()
+        self._update_sidebar_book_info()
 
     def _suggest_output_folder(self):
         if self.output_folder: return
@@ -2387,7 +2709,6 @@ class AudiobookApp(QMainWindow):
     def _on_extract_done(self, guardados, descartados):
         from PyQt6.QtWidgets import QMessageBox
         set_status(self.status1, f"✅ {guardados} capítulos extraídos · {descartados} descartados.", "ok")
-        self.card1.set_state("done")
         self.btn_extract.setEnabled(True)
 
         msg = QMessageBox(self)
@@ -2414,7 +2735,7 @@ class AudiobookApp(QMainWindow):
         # Detección de idioma automática (post-dialog)
         self._detect_and_auto_voice()
 
-        self.card3.set_state("active")
+        self._tabs.setCurrentIndex(1)
         self._suggest_output_folder()
         if not self.output_folder:
             suggested = str(Path(self.txt_folder).parent / (Path(self.txt_folder).name + "_mp3"))
@@ -2433,6 +2754,7 @@ class AudiobookApp(QMainWindow):
             item.setData(Qt.ItemDataRole.UserRole, str(f))
             self.file_list.addItem(item)
         count = len(self.txt_files)
+        self.lbl_sb_chapters.setText(f"CAPÍTULOS  ·  {count}" if count else "CAPÍTULOS")
         set_status(self.status3, f"{count} archivo{'s' if count!=1 else ''} listos para procesar.", "idle")
         self._refresh_player()
 
@@ -2444,9 +2766,8 @@ class AudiobookApp(QMainWindow):
 
     def _on_engine_changed(self):
         eng = self._current_engine()
-        self.piper_panel.setVisible(eng == 'piper')
-        self.qwen_local_panel.setVisible(eng == 'qwen_local')
-        self.qwen_api_panel.setVisible(eng == 'qwen_api')
+        idx = {'piper': 0, 'qwen_local': 1, 'qwen_api': 2}.get(eng, 0)
+        self._engine_stack.setCurrentIndex(idx)
 
     def _pick_clone_ref(self):
         path, _ = QFileDialog.getOpenFileName(
@@ -2641,7 +2962,6 @@ class AudiobookApp(QMainWindow):
 
     def _on_audio_finished(self):
         set_status(self.status3, "✅ ¡Audiolibro generado correctamente!", "ok")
-        self.card3.set_state("done")
         self.btn_generate.setEnabled(True); self.btn_stop.setEnabled(False)
         self.btn_open_folder.setEnabled(True)
         self.prog_audio.setValue(100)
@@ -2740,13 +3060,11 @@ class AudiobookApp(QMainWindow):
         if not self._queue:
             set_status(self.status_queue, "Cola vacía.", "warn"); return
         self._queue_idx = 0
-        self.card_queue.set_state("active")
         self._process_next_in_queue()
 
     def _process_next_in_queue(self):
         if self._queue_idx >= len(self._queue):
             set_status(self.status_queue, f"✅ Cola completada — {len(self._queue)} proyecto(s).", "ok")
-            self.card_queue.set_state("done")
             self._queue.clear()
             self.queue_list.clear()
             self.btn_process_queue.setEnabled(False)
