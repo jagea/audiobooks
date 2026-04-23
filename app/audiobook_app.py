@@ -21,7 +21,6 @@ Mejoras v2.0:
 """
 
 import sys
-import os
 import re
 import wave
 import json
@@ -32,6 +31,11 @@ import tempfile
 from pathlib import Path
 from dataclasses import dataclass, field
 from typing import Optional
+
+# ── Entorno HuggingFace: descarga rápida con hf_xet, sin warnings de symlinks ─
+import os
+os.environ.setdefault("HF_HUB_ENABLE_HF_TRANSFER", "1")   # protocolo xet más rápido
+os.environ.setdefault("HF_HUB_DISABLE_SYMLINKS_WARNING", "1")  # Windows no soporta symlinks
 
 import onnxruntime  # debe importarse ANTES de piper para evitar conflicto de DLL con onnxruntime-gpu
 import numpy as np
@@ -885,6 +889,35 @@ def escribir_metadatos_mp3(mp3_path, pista, total, metadata):
         pass
 
 
+# ── Caché global del modelo Qwen (evita recargar entre capítulos y previews) ──
+_QWEN_MODEL_CACHE: dict = {}   # model_id → Qwen3TTSModel instance
+
+
+def get_qwen_model(model_id: str, log_fn=None):
+    """
+    Carga Qwen3TTSModel desde caché o Hugging Face.
+    Muestra progreso de descarga si se pasa log_fn.
+    """
+    if model_id in _QWEN_MODEL_CACHE:
+        return _QWEN_MODEL_CACHE[model_id]
+
+    import torch
+    from qwen_tts import Qwen3TTSModel
+
+    device = 'cuda:0' if torch.cuda.is_available() else 'cpu'
+    dtype  = torch.bfloat16 if torch.cuda.is_available() else torch.float32
+
+    if log_fn:
+        log_fn(f"⏳ Cargando {model_id.split('/')[-1]} en {device}…  (primera vez: descarga del modelo)")
+
+    model = Qwen3TTSModel.from_pretrained(model_id, device_map=device, dtype=dtype)
+    _QWEN_MODEL_CACHE[model_id] = model
+
+    if log_fn:
+        log_fn(f"✅ Modelo listo y en caché.")
+    return model
+
+
 def chunk_text_qwen(texto: str, max_chars: int = 600) -> list:
     """Divide texto en chunks a nivel de párrafo para inferencia Qwen."""
     paragraphs = [p.strip() for p in re.split(r'\n\n+', texto.strip()) if p.strip()]
@@ -1103,8 +1136,6 @@ class QwenLocalWorker(QThread):
 
     def run(self):
         try:
-            import torch
-            from qwen_tts import Qwen3TTSModel
             import soundfile as sf
 
             # Determine synthesis mode from params
@@ -1115,14 +1146,7 @@ class QwenLocalWorker(QThread):
             else:
                 mode = 'custom'
 
-            device = 'cuda:0' if torch.cuda.is_available() else 'cpu'
-            dtype  = torch.bfloat16 if torch.cuda.is_available() else torch.float32
-
-            self.log.emit(f"⏳ Cargando {self.model_id} en {device}…")
-            model = Qwen3TTSModel.from_pretrained(
-                self.model_id, device_map=device, dtype=dtype
-            )
-            self.log.emit("✅ Modelo listo.")
+            model = get_qwen_model(self.model_id, log_fn=self.log.emit)
 
             total      = len(self.txt_files)
             file_times = []
@@ -2445,11 +2469,8 @@ class AudiobookApp(QMainWindow):
                 self.language = language; self.instruct = instruct
             def run(self):
                 try:
-                    import torch, soundfile as sf
-                    from qwen_tts import Qwen3TTSModel
-                    device = 'cuda:0' if torch.cuda.is_available() else 'cpu'
-                    dtype  = torch.bfloat16 if torch.cuda.is_available() else torch.float32
-                    model  = Qwen3TTSModel.from_pretrained(self.model_id, device_map=device, dtype=dtype)
+                    import soundfile as sf
+                    model  = get_qwen_model(self.model_id)
                     text   = ("El veloz murciélago hindú comía feliz cardillo y kiwi."
                               if self.language in ('Spanish', 'Auto')
                               else "The quick brown fox jumps over the lazy dog.")
