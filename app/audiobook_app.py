@@ -33,6 +33,7 @@ from pathlib import Path
 from dataclasses import dataclass, field
 from typing import Optional
 
+import onnxruntime  # debe importarse ANTES de piper para evitar conflicto de DLL con onnxruntime-gpu
 import numpy as np
 import ebooklib
 from ebooklib import epub
