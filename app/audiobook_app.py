@@ -32,10 +32,15 @@ from pathlib import Path
 from dataclasses import dataclass, field
 from typing import Optional
 
-# ── Entorno HuggingFace: descarga rápida con hf_xet, sin warnings de symlinks ─
+# ── Entorno HuggingFace: descarga rápida con hf_transfer, sin warnings de symlinks ─
 import os
-os.environ.setdefault("HF_HUB_ENABLE_HF_TRANSFER", "1")   # protocolo xet más rápido
 os.environ.setdefault("HF_HUB_DISABLE_SYMLINKS_WARNING", "1")  # Windows no soporta symlinks
+try:
+    import hf_transfer as _hft  # noqa: F401 — solo para comprobar que está instalado
+    os.environ.setdefault("HF_HUB_ENABLE_HF_TRANSFER", "1")   # activa protocolo rápido
+    del _hft
+except ImportError:
+    pass  # hf_transfer no instalado → HuggingFace usa HTTP normal sin errores
 
 # ── Añadir SoX al PATH si winget lo instaló pero el shell no se ha reiniciado ─
 import glob as _glob
