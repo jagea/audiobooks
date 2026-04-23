@@ -1,7 +1,12 @@
 """
-audiobook_app.py  v2.0
+audiobook_app.py  v2.1
 Generador de Audiolibros
 Flujo: EPUB/PDF/MOBI → Extraer/Limpiar TXT → Generar MP3 → [Exportar M4B]
+
+Motores de síntesis disponibles:
+  · Piper TTS  — local, sin GPU, voces .onnx
+  · Qwen3-TTS  — local, GPU (CUDA), voces predefinidas / diseño libre / clonación
+  · Qwen3-TTS API — nube DashScope, solo clave API
 
 Mejoras v2.0:
   · Normalización LUFS por capítulo
@@ -38,10 +43,32 @@ from PyQt6.QtWidgets import (
     QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
     QPushButton, QLabel, QFileDialog, QSlider, QProgressBar,
     QListWidget, QListWidgetItem, QFrame, QComboBox, QSizePolicy,
-    QScrollArea, QLineEdit, QTextEdit, QCheckBox, QDoubleSpinBox
+    QScrollArea, QLineEdit, QTextEdit, QCheckBox, QDoubleSpinBox,
+    QRadioButton, QButtonGroup, QStackedWidget
 )
 from PyQt6.QtCore import Qt, QThread, pyqtSignal, QUrl
 from PyQt6.QtGui import QIntValidator
+
+
+# ── Qwen3-TTS constants ────────────────────────────────────────────────────────
+QWEN_LOCAL_VOICES = [
+    'Vivian', 'Serena', 'Uncle_Fu', 'Dylan', 'Eric',
+    'Ryan', 'Aiden', 'Ono_Anna', 'Sohee',
+]
+QWEN_LOCAL_MODELS = {
+    'Custom Voice (1.7B)':  'Qwen/Qwen3-TTS-12Hz-1.7B-CustomVoice',
+    'Custom Voice (0.6B)':  'Qwen/Qwen3-TTS-12Hz-0.6B-CustomVoice',
+    'Voice Design (1.7B)':  'Qwen/Qwen3-TTS-12Hz-1.7B-VoiceDesign',
+    'Voice Clone (1.7B)':   'Qwen/Qwen3-TTS-12Hz-1.7B-Base',
+}
+QWEN_LOCAL_LANGS = [
+    'Auto', 'Spanish', 'English', 'French', 'German',
+    'Italian', 'Portuguese', 'Russian', 'Japanese', 'Korean', 'Chinese',
+]
+QWEN_API_MODELS = ['qwen3-tts-flash', 'qwen3-tts-instruct-flash']
+QWEN_API_VOICES = ['Cherry', 'Serena', 'Dylan', 'Eric', 'Ryan', 'Aiden']
+QWEN_API_LANGS  = ['Auto', 'Chinese', 'English', 'Spanish', 'French', 'German',
+                   'Italian', 'Portuguese', 'Russian', 'Japanese', 'Korean']
 
 try:
     from PyQt6.QtMultimedia import QMediaPlayer, QAudioOutput
@@ -240,6 +267,22 @@ QDoubleSpinBox {{
 }}
 QDoubleSpinBox::up-button, QDoubleSpinBox::down-button {{
     background: {BORDER}; width: 18px; border-radius: 3px;
+}}
+QRadioButton {{
+    color: {TEXT_PRIMARY}; font-size: 12px; spacing: 8px;
+}}
+QRadioButton::indicator {{
+    width: 15px; height: 15px;
+    background: {BG_ITEM}; border: 1px solid {BORDER};
+    border-radius: 8px;
+}}
+QRadioButton::indicator:checked {{
+    background: {ACCENT}; border-color: {ACCENT};
+}}
+QWidget#engine_panel {{
+    background-color: {BG_ITEM};
+    border: 1px solid {BORDER};
+    border-radius: 8px;
 }}
 """
 
@@ -811,6 +854,52 @@ def sintetizar(voice, texto, tmp):
     s, _, _, _ = wav_to_numpy(tmp)
     return s
 
+def escribir_metadatos_mp3(mp3_path, pista, total, metadata):
+    """Escribe tags ID3 en un MP3. Funciona con cualquier motor TTS."""
+    try:
+        from mutagen.id3 import ID3, TIT2, TPE1, TALB, TRCK, TCON, TDRC, APIC, ID3NoHeaderError
+        titulo = metadata.get('titulo', '')
+        autor  = metadata.get('autor', '')
+        anyo   = metadata.get('anyo', '')
+        cover  = metadata.get('cover', None)
+        cap    = Path(mp3_path).stem
+        try:
+            tags = ID3(mp3_path)
+        except ID3NoHeaderError:
+            tags = ID3()
+        if titulo:
+            tags['TIT2'] = TIT2(encoding=3, text=f"{titulo} - {cap}")
+            tags['TALB'] = TALB(encoding=3, text=titulo)
+        if autor:
+            tags['TPE1'] = TPE1(encoding=3, text=autor)
+        tags['TRCK'] = TRCK(encoding=3, text=f"{pista}/{total}")
+        tags['TCON'] = TCON(encoding=3, text="Audiobook")
+        if anyo:
+            tags['TDRC'] = TDRC(encoding=3, text=anyo)
+        if cover:
+            mime = 'image/jpeg' if cover[:3] == b'\xff\xd8\xff' else 'image/png'
+            tags['APIC'] = APIC(encoding=3, mime=mime, type=3, desc='Cover', data=cover)
+        tags.save(mp3_path)
+    except Exception:
+        pass
+
+
+def chunk_text_qwen(texto: str, max_chars: int = 600) -> list:
+    """Divide texto en chunks a nivel de párrafo para inferencia Qwen."""
+    paragraphs = [p.strip() for p in re.split(r'\n\n+', texto.strip()) if p.strip()]
+    chunks, current, current_len = [], [], 0
+    for p in paragraphs:
+        if current and current_len + len(p) > max_chars:
+            chunks.append('\n\n'.join(current))
+            current, current_len = [p], len(p)
+        else:
+            current.append(p)
+            current_len += len(p)
+    if current:
+        chunks.append('\n\n'.join(current))
+    return chunks or [texto[:max_chars]]
+
+
 def trocear(texto):
     resultado = []
     parrafos  = re.split(r'\n\n+', texto.strip())
@@ -865,34 +954,7 @@ class AudioWorker(QThread):
         return ",".join(filters) if filters else None
 
     def _escribir_metadatos(self, mp3_path, pista, total):
-        try:
-            from mutagen.id3 import ID3, TIT2, TPE1, TALB, TRCK, TCON, TDRC, APIC, ID3NoHeaderError
-            titulo = self.metadata.get('titulo', '')
-            autor  = self.metadata.get('autor', '')
-            anyo   = self.metadata.get('anyo', '')
-            cover  = self.metadata.get('cover', None)
-            nombre_cap = Path(mp3_path).stem
-
-            try:
-                tags = ID3(mp3_path)
-            except ID3NoHeaderError:
-                tags = ID3()
-
-            if titulo:
-                tags['TIT2'] = TIT2(encoding=3, text=f"{titulo} - {nombre_cap}")
-                tags['TALB'] = TALB(encoding=3, text=titulo)
-            if autor:
-                tags['TPE1'] = TPE1(encoding=3, text=autor)
-            tags['TRCK'] = TRCK(encoding=3, text=f"{pista}/{total}")
-            tags['TCON'] = TCON(encoding=3, text="Audiobook")
-            if anyo:
-                tags['TDRC'] = TDRC(encoding=3, text=anyo)
-            if cover:
-                mime = 'image/jpeg' if cover[:3] == b'\xff\xd8\xff' else 'image/png'
-                tags['APIC'] = APIC(encoding=3, mime=mime, type=3, desc='Cover', data=cover)
-            tags.save(mp3_path)
-        except Exception:
-            pass
+        escribir_metadatos_mp3(mp3_path, pista, total, self.metadata)
 
     def stop(self):
         self._stop = True
@@ -985,6 +1047,341 @@ class AudioWorker(QThread):
 
                 self.progress.emit(int((idx+1)/total*100))
 
+        except Exception as e:
+            self.error.emit(str(e))
+        self.finished.emit()
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# QWEN3-TTS LOCAL WORKER
+# ══════════════════════════════════════════════════════════════════════════════
+
+class QwenLocalWorker(QThread):
+    """
+    Genera audio capítulo a capítulo usando Qwen3-TTS local (GPU).
+    Modos:
+      · custom  — voces predefinidas (Vivian, Serena, Dylan…)
+      · design  — describe la voz en lenguaje natural (instruct)
+      · clone   — clona a partir de un audio de referencia
+    """
+    progress     = pyqtSignal(int)
+    log          = pyqtSignal(str)
+    file_started = pyqtSignal(str)
+    file_done    = pyqtSignal(str, bool)
+    eta_updated  = pyqtSignal(str)
+    skipped      = pyqtSignal(str)
+    finished     = pyqtSignal()
+    error        = pyqtSignal(str)
+
+    def __init__(self, txt_files, output_dir, model_id, speaker, language,
+                 instruct='', ref_audio='', ref_text='', speed=1.0,
+                 normalize=True, pausa_parrafo=0.8, resume=False, metadata=None):
+        super().__init__()
+        self.txt_files     = txt_files
+        self.output_dir    = output_dir
+        self.model_id      = model_id
+        self.speaker       = speaker
+        self.language      = language
+        self.instruct      = instruct
+        self.ref_audio     = ref_audio
+        self.ref_text      = ref_text
+        self.speed         = speed
+        self.normalize     = normalize
+        self.pausa_parrafo = pausa_parrafo
+        self.resume        = resume
+        self.metadata      = metadata or {}
+        self._stop         = False
+
+    def _build_filter(self) -> Optional[str]:
+        f = []
+        if self.normalize: f.append("loudnorm=I=-16:LRA=11:TP=-1.5")
+        if self.speed != 1.0: f.append(f"atempo={self.speed:.2f}")
+        return ','.join(f) or None
+
+    def stop(self): self._stop = True
+
+    def run(self):
+        try:
+            import torch
+            from qwen_tts import Qwen3TTSModel
+            import soundfile as sf
+
+            # Determine synthesis mode from params
+            if self.ref_audio:
+                mode = 'clone'
+            elif 'VoiceDesign' in self.model_id or (self.instruct and not self.speaker):
+                mode = 'design'
+            else:
+                mode = 'custom'
+
+            device = 'cuda:0' if torch.cuda.is_available() else 'cpu'
+            dtype  = torch.bfloat16 if torch.cuda.is_available() else torch.float32
+
+            self.log.emit(f"⏳ Cargando {self.model_id} en {device}…")
+            model = Qwen3TTSModel.from_pretrained(
+                self.model_id, device_map=device, dtype=dtype
+            )
+            self.log.emit("✅ Modelo listo.")
+
+            total      = len(self.txt_files)
+            file_times = []
+            audio_filt = self._build_filter()
+
+            for idx, txt_path in enumerate(self.txt_files):
+                if self._stop: break
+                name = Path(txt_path).stem
+
+                out_mp3 = os.path.join(self.output_dir, f"{name}.mp3")
+                if self.resume and os.path.exists(out_mp3):
+                    self.skipped.emit(name)
+                    self.file_done.emit(name, True)
+                    self.progress.emit(int((idx+1)/total*100))
+                    continue
+
+                t_start = time.time()
+                self.file_started.emit(name)
+
+                try:
+                    text   = Path(txt_path).read_text(encoding='utf-8').strip()
+                    chunks = chunk_text_qwen(text, max_chars=600)
+
+                    all_audio, sr = [], 24000
+                    for chunk in chunks:
+                        if self._stop: break
+                        if mode == 'custom':
+                            wavs, sr = model.generate_custom_voice(
+                                text=chunk, language=self.language,
+                                speaker=self.speaker,
+                                instruct=self.instruct or None,
+                            )
+                        elif mode == 'design':
+                            wavs, sr = model.generate_voice_design(
+                                text=chunk, language=self.language,
+                                instruct=self.instruct,
+                            )
+                        else:  # clone
+                            wavs, sr = model.generate_voice_clone(
+                                text=chunk, language=self.language,
+                                ref_audio=self.ref_audio, ref_text=self.ref_text,
+                            )
+                        all_audio.append(wavs[0])
+                        # pausa entre chunks
+                        all_audio.append(np.zeros(int(sr * self.pausa_parrafo), dtype=np.float32))
+
+                    if self._stop:
+                        self.file_done.emit(name, False); break
+
+                    out_wav = os.path.join(self.output_dir, f"{name}.wav")
+                    sf.write(out_wav, np.concatenate(all_audio), sr)
+
+                    cmd = ["ffmpeg", "-y", "-i", out_wav,
+                           "-codec:a", "libmp3lame", "-qscale:a", "2"]
+                    if audio_filt:
+                        cmd += ["-filter:a", audio_filt]
+                    cmd.append(out_mp3)
+                    res = subprocess.run(cmd, capture_output=True)
+                    if res.returncode == 0 and os.path.exists(out_mp3):
+                        os.remove(out_wav)
+                        escribir_metadatos_mp3(out_mp3, idx+1, total, self.metadata)
+                        self.file_done.emit(name, True)
+                    else:
+                        self.file_done.emit(name, False)
+
+                except Exception as e:
+                    self.error.emit(f"{name}: {e}")
+                    self.file_done.emit(name, False)
+
+                file_times.append(time.time() - t_start)
+                remaining = total - idx - 1
+                if remaining > 0:
+                    avg = sum(file_times) / len(file_times)
+                    s   = int(avg * remaining)
+                    m, s = divmod(s, 60)
+                    self.eta_updated.emit(f"~{m}m {s:02d}s restantes" if m else f"~{s}s restantes")
+                self.progress.emit(int((idx+1)/total*100))
+
+        except ImportError:
+            self.error.emit("❌ qwen-tts no instalado. Ejecuta: pip install qwen-tts")
+        except Exception as e:
+            self.error.emit(str(e))
+        self.finished.emit()
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# QWEN3-TTS API WORKER (DashScope)
+# ══════════════════════════════════════════════════════════════════════════════
+
+class QwenAPIWorker(QThread):
+    """
+    Genera audio usando la API de Qwen TTS (DashScope / Alibaba Cloud).
+    Requiere DASHSCOPE_API_KEY o clave introducida manualmente.
+    Descarga WAV desde la URL devuelta por la API y convierte a MP3.
+    """
+    progress     = pyqtSignal(int)
+    log          = pyqtSignal(str)
+    file_started = pyqtSignal(str)
+    file_done    = pyqtSignal(str, bool)
+    eta_updated  = pyqtSignal(str)
+    skipped      = pyqtSignal(str)
+    finished     = pyqtSignal()
+    error        = pyqtSignal(str)
+
+    API_URL = 'https://dashscope-intl.aliyuncs.com/api/v1'
+
+    def __init__(self, txt_files, output_dir, api_key, model, voice, language,
+                 speed=1.0, normalize=True, pausa_parrafo=0.5,
+                 resume=False, metadata=None):
+        super().__init__()
+        self.txt_files     = txt_files
+        self.output_dir    = output_dir
+        self.api_key       = api_key
+        self.model         = model
+        self.voice         = voice
+        self.language      = language
+        self.speed         = speed
+        self.normalize     = normalize
+        self.pausa_parrafo = pausa_parrafo
+        self.resume        = resume
+        self.metadata      = metadata or {}
+        self._stop         = False
+
+    def _build_filter(self) -> Optional[str]:
+        f = []
+        if self.normalize: f.append("loudnorm=I=-16:LRA=11:TP=-1.5")
+        if self.speed != 1.0: f.append(f"atempo={self.speed:.2f}")
+        return ','.join(f) or None
+
+    def _extract_audio_url(self, response) -> Optional[str]:
+        """Extrae la URL de audio de la respuesta DashScope (varios formatos posibles)."""
+        try:
+            # Formato 1: response.output.audio.url
+            return response.output.audio.url
+        except AttributeError:
+            pass
+        try:
+            # Formato 2: choices[0].message.content[0]['audio']['url']
+            content = response.output.choices[0].message.content
+            if isinstance(content, list):
+                for item in content:
+                    if isinstance(item, dict) and 'audio' in item:
+                        return item['audio'].get('url')
+            if isinstance(content, dict):
+                return content.get('audio', {}).get('url')
+        except (AttributeError, IndexError, TypeError):
+            pass
+        try:
+            # Formato 3: acceso por dict
+            return response['output']['audio']['url']
+        except (KeyError, TypeError):
+            pass
+        return None
+
+    def stop(self): self._stop = True
+
+    def run(self):
+        try:
+            import dashscope
+            import requests as req_lib
+
+            dashscope.base_http_api_url = self.API_URL
+            total      = len(self.txt_files)
+            file_times = []
+            audio_filt = self._build_filter()
+            tmp_dir    = tempfile.mkdtemp()
+
+            for idx, txt_path in enumerate(self.txt_files):
+                if self._stop: break
+                name = Path(txt_path).stem
+
+                out_mp3 = os.path.join(self.output_dir, f"{name}.mp3")
+                if self.resume and os.path.exists(out_mp3):
+                    self.skipped.emit(name)
+                    self.file_done.emit(name, True)
+                    self.progress.emit(int((idx+1)/total*100))
+                    continue
+
+                t_start = time.time()
+                self.file_started.emit(name)
+
+                try:
+                    text   = Path(txt_path).read_text(encoding='utf-8').strip()
+                    # API puede manejar chunks más largos
+                    chunks = chunk_text_qwen(text, max_chars=1800)
+
+                    wav_parts = []
+                    for chunk_idx, chunk in enumerate(chunks):
+                        if self._stop: break
+
+                        resp = dashscope.MultiModalConversation.call(
+                            model    = self.model,
+                            api_key  = self.api_key,
+                            text     = chunk,
+                            voice    = self.voice,
+                            language_type = self.language if self.language != 'Auto' else None,
+                        )
+
+                        audio_url = self._extract_audio_url(resp)
+                        if not audio_url:
+                            self.log.emit(f"⚠ Chunk {chunk_idx+1}: sin URL de audio (resp={resp})")
+                            continue
+
+                        wav_bytes = req_lib.get(audio_url, timeout=60).content
+                        chunk_wav = os.path.join(tmp_dir, f"{name}_chunk{chunk_idx:03d}.wav")
+                        with open(chunk_wav, 'wb') as f:
+                            f.write(wav_bytes)
+                        wav_parts.append(chunk_wav)
+
+                    if self._stop:
+                        self.file_done.emit(name, False); break
+
+                    if not wav_parts:
+                        self.file_done.emit(name, False); continue
+
+                    # Concatenar chunks con ffmpeg
+                    if len(wav_parts) == 1:
+                        combined_wav = wav_parts[0]
+                    else:
+                        concat_file = os.path.join(tmp_dir, f"{name}_concat.txt")
+                        with open(concat_file, 'w') as f:
+                            for wp in wav_parts:
+                                f.write(f"file '{wp}'\n")
+                        combined_wav = os.path.join(tmp_dir, f"{name}_combined.wav")
+                        subprocess.run(
+                            ["ffmpeg", "-y", "-f", "concat", "-safe", "0",
+                             "-i", concat_file, combined_wav],
+                            capture_output=True
+                        )
+
+                    # Añadir pausa de silencio entre capítulos (ya viene del servidor, solo al final)
+                    cmd = ["ffmpeg", "-y", "-i", combined_wav,
+                           "-codec:a", "libmp3lame", "-qscale:a", "2"]
+                    if audio_filt:
+                        cmd += ["-filter:a", audio_filt]
+                    cmd.append(out_mp3)
+                    res = subprocess.run(cmd, capture_output=True)
+                    if res.returncode == 0 and os.path.exists(out_mp3):
+                        escribir_metadatos_mp3(out_mp3, idx+1, total, self.metadata)
+                        self.file_done.emit(name, True)
+                    else:
+                        self.file_done.emit(name, False)
+
+                except Exception as e:
+                    self.error.emit(f"{name}: {e}")
+                    self.file_done.emit(name, False)
+
+                file_times.append(time.time() - t_start)
+                remaining = total - idx - 1
+                if remaining > 0:
+                    avg = sum(file_times) / len(file_times)
+                    s   = int(avg * remaining)
+                    m, s = divmod(s, 60)
+                    self.eta_updated.emit(f"~{m}m {s:02d}s restantes" if m else f"~{s}s restantes")
+                self.progress.emit(int((idx+1)/total*100))
+
+            shutil.rmtree(tmp_dir, ignore_errors=True)
+
+        except ImportError:
+            self.error.emit("❌ dashscope no instalado. Ejecuta: pip install dashscope")
         except Exception as e:
             self.error.emit(str(e))
         self.finished.emit()
@@ -1270,7 +1667,7 @@ SESSION_FILE = Path(__file__).parent / "session.json"
 class AudiobookApp(QMainWindow):
     def __init__(self):
         super().__init__()
-        self.setWindowTitle("Generador de Audiolibros  v2.0")
+        self.setWindowTitle("Generador de Audiolibros  v2.1")
         self.setMinimumSize(720, 960)
         self.setStyleSheet(STYLESHEET)
         self.setAcceptDrops(True)
@@ -1285,7 +1682,8 @@ class AudiobookApp(QMainWindow):
         self.cover_data     = None
         self._voice_langs   = {}
         self._queue: list[QueueProject] = []
-        self._queue_idx = 0
+        self._queue_idx  = 0
+        self._clone_ref_path = ""   # ruta WAV de referencia para clonación Qwen
         self._build_ui()
         self._load_session()
 
@@ -1429,7 +1827,24 @@ class AudiobookApp(QMainWindow):
         row_out.addWidget(self.lbl_output); row_out.addWidget(btn_out)
         self.card3.add_layout(row_out)
 
-        self.card3.add_widget(section_label("Voz"))
+        # ── Motor de síntesis ──────────────────────────────────────────────
+        self.card3.add_widget(section_label("Motor de síntesis"))
+        row_eng = QHBoxLayout(); row_eng.setSpacing(20)
+        self._engine_group = QButtonGroup(self)
+        self.radio_piper      = QRadioButton("🦜  Piper  (local · CPU · .onnx)")
+        self.radio_qwen_local = QRadioButton("🔮  Qwen3-TTS  (local · GPU)")
+        self.radio_qwen_api   = QRadioButton("☁️  Qwen3-TTS  (API · DashScope)")
+        self.radio_piper.setChecked(True)
+        for r in [self.radio_piper, self.radio_qwen_local, self.radio_qwen_api]:
+            self._engine_group.addButton(r)
+            row_eng.addWidget(r)
+        row_eng.addStretch()
+        self.card3.add_layout(row_eng)
+
+        # ── Panel Piper ────────────────────────────────────────────────────
+        self.piper_panel = QWidget(); self.piper_panel.setObjectName("engine_panel")
+        pp_layout = QVBoxLayout(self.piper_panel); pp_layout.setContentsMargins(10, 8, 10, 8)
+        pp_layout.addWidget(section_label("Voz Piper"))
         row_voice = QHBoxLayout(); row_voice.setSpacing(8)
         self.combo_voice = QComboBox(); self._populate_voices()
         self.combo_voice.currentIndexChanged.connect(self._on_voice_changed)
@@ -1439,9 +1854,110 @@ class AudiobookApp(QMainWindow):
         row_voice.addWidget(self.combo_voice, 1)
         row_voice.addWidget(self.lbl_quality)
         row_voice.addWidget(self.btn_preview_voice)
-        self.card3.add_layout(row_voice)
+        pp_layout.addLayout(row_voice)
+        self.card3.add_widget(self.piper_panel)
         self._on_voice_changed()
 
+        # ── Panel Qwen Local ───────────────────────────────────────────────
+        self.qwen_local_panel = QWidget(); self.qwen_local_panel.setObjectName("engine_panel")
+        ql_layout = QVBoxLayout(self.qwen_local_panel); ql_layout.setContentsMargins(10, 8, 10, 8); ql_layout.setSpacing(8)
+
+        ql_r1 = QHBoxLayout(); ql_r1.setSpacing(10)
+        ql_r1.addWidget(section_label("Modelo"))
+        self.combo_qwen_model = QComboBox()
+        for k in QWEN_LOCAL_MODELS: self.combo_qwen_model.addItem(k, QWEN_LOCAL_MODELS[k])
+        ql_r1.addWidget(self.combo_qwen_model, 2)
+        ql_r1.addWidget(section_label("Idioma"))
+        self.combo_qwen_lang = QComboBox()
+        for lang in QWEN_LOCAL_LANGS: self.combo_qwen_lang.addItem(lang)
+        ql_r1.addWidget(self.combo_qwen_lang, 1)
+        ql_layout.addLayout(ql_r1)
+
+        ql_r2 = QHBoxLayout(); ql_r2.setSpacing(10)
+        ql_r2.addWidget(section_label("Voz"))
+        self.combo_qwen_speaker = QComboBox()
+        for v in QWEN_LOCAL_VOICES: self.combo_qwen_speaker.addItem(v)
+        ql_r2.addWidget(self.combo_qwen_speaker, 1)
+        self.btn_qwen_preview = QPushButton("▶ Probar"); self.btn_qwen_preview.setObjectName("browse_btn")
+        self.btn_qwen_preview.clicked.connect(self._preview_qwen_voice)
+        ql_r2.addWidget(self.btn_qwen_preview)
+        ql_layout.addLayout(ql_r2)
+
+        lbl_inst = section_label("Instrucción de voz  (opcional — describe el estilo o usa 'Voice Design')")
+        ql_layout.addWidget(lbl_inst)
+        self.txt_qwen_instruct = QLineEdit()
+        self.txt_qwen_instruct.setPlaceholderText(
+            "Ej: «Narrate with a calm, engaging storytelling tone, slightly warm and expressive.»"
+        )
+        self.txt_qwen_instruct.setStyleSheet(
+            f"QLineEdit {{ background:{BG_DARK}; border:1px solid {BORDER}; border-radius:6px; "
+            f"padding:7px 10px; color:{TEXT_PRIMARY}; font-size:12px; }}"
+        )
+        ql_layout.addWidget(self.txt_qwen_instruct)
+
+        lbl_clone = section_label("Clonación de voz  (modo Clone: audio de referencia + transcripción)")
+        ql_layout.addWidget(lbl_clone)
+        ql_r3 = QHBoxLayout(); ql_r3.setSpacing(8)
+        self.lbl_qwen_ref = QLabel("Sin referencia (modo Custom/Design)"); self.lbl_qwen_ref.setObjectName("path_label")
+        self.lbl_qwen_ref.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
+        btn_ref = QPushButton("🎙 Seleccionar WAV"); btn_ref.setObjectName("browse_btn")
+        btn_ref.clicked.connect(self._pick_clone_ref)
+        btn_clear_ref = QPushButton("✕"); btn_clear_ref.setObjectName("browse_btn"); btn_clear_ref.setFixedWidth(32)
+        btn_clear_ref.clicked.connect(self._clear_clone_ref)
+        ql_r3.addWidget(self.lbl_qwen_ref); ql_r3.addWidget(btn_ref); ql_r3.addWidget(btn_clear_ref)
+        ql_layout.addLayout(ql_r3)
+        self.txt_qwen_ref_text = QLineEdit()
+        self.txt_qwen_ref_text.setPlaceholderText("Transcripción exacta del audio de referencia…")
+        self.txt_qwen_ref_text.setStyleSheet(
+            f"QLineEdit {{ background:{BG_DARK}; border:1px solid {BORDER}; border-radius:6px; "
+            f"padding:7px 10px; color:{TEXT_MUTED}; font-size:11px; }}"
+        )
+        ql_layout.addWidget(self.txt_qwen_ref_text)
+
+        self.qwen_local_panel.hide()
+        self.card3.add_widget(self.qwen_local_panel)
+
+        # ── Panel Qwen API ─────────────────────────────────────────────────
+        self.qwen_api_panel = QWidget(); self.qwen_api_panel.setObjectName("engine_panel")
+        qa_layout = QVBoxLayout(self.qwen_api_panel); qa_layout.setContentsMargins(10, 8, 10, 8); qa_layout.setSpacing(8)
+
+        qa_r1 = QHBoxLayout(); qa_r1.setSpacing(10)
+        qa_r1.addWidget(section_label("Clave API"))
+        self.txt_api_key = QLineEdit()
+        self.txt_api_key.setPlaceholderText("DASHSCOPE_API_KEY  (o variable de entorno)")
+        self.txt_api_key.setEchoMode(QLineEdit.EchoMode.Password)
+        self.txt_api_key.setText(os.getenv('DASHSCOPE_API_KEY', ''))
+        self.txt_api_key.setStyleSheet(
+            f"QLineEdit {{ background:{BG_DARK}; border:1px solid {BORDER}; border-radius:6px; "
+            f"padding:7px 10px; color:{TEXT_PRIMARY}; font-size:12px; font-family:'Courier New'; }}"
+        )
+        qa_r1.addWidget(self.txt_api_key, 1)
+        qa_layout.addLayout(qa_r1)
+
+        qa_r2 = QHBoxLayout(); qa_r2.setSpacing(10)
+        qa_r2.addWidget(section_label("Modelo"))
+        self.combo_api_model = QComboBox()
+        for m in QWEN_API_MODELS: self.combo_api_model.addItem(m)
+        qa_r2.addWidget(self.combo_api_model, 1)
+        qa_r2.addWidget(section_label("Voz"))
+        self.combo_api_voice = QComboBox()
+        for v in QWEN_API_VOICES: self.combo_api_voice.addItem(v)
+        qa_r2.addWidget(self.combo_api_voice, 1)
+        qa_r2.addWidget(section_label("Idioma"))
+        self.combo_api_lang = QComboBox()
+        for lang in QWEN_API_LANGS: self.combo_api_lang.addItem(lang)
+        qa_r2.addWidget(self.combo_api_lang, 1)
+        qa_layout.addLayout(qa_r2)
+
+        self.qwen_api_panel.hide()
+        self.card3.add_widget(self.qwen_api_panel)
+
+        # Conectar radio buttons → mostrar panel correcto
+        self.radio_piper.toggled.connect(self._on_engine_changed)
+        self.radio_qwen_local.toggled.connect(self._on_engine_changed)
+        self.radio_qwen_api.toggled.connect(self._on_engine_changed)
+
+        # ── Metadatos ──────────────────────────────────────────────────────
         self.card3.add_widget(section_label("Metadatos del audiolibro"))
         meta_style = f"""
             QLineEdit {{
@@ -1880,6 +2396,83 @@ class AudiobookApp(QMainWindow):
         set_status(self.status3, f"{count} archivo{'s' if count!=1 else ''} listos para procesar.", "idle")
         self._refresh_player()
 
+    # ── Engine helpers ────────────────────────────────────────────────────────
+    def _current_engine(self) -> str:
+        if self.radio_qwen_local.isChecked(): return 'qwen_local'
+        if self.radio_qwen_api.isChecked():   return 'qwen_api'
+        return 'piper'
+
+    def _on_engine_changed(self):
+        eng = self._current_engine()
+        self.piper_panel.setVisible(eng == 'piper')
+        self.qwen_local_panel.setVisible(eng == 'qwen_local')
+        self.qwen_api_panel.setVisible(eng == 'qwen_api')
+
+    def _pick_clone_ref(self):
+        path, _ = QFileDialog.getOpenFileName(
+            self, "Audio de referencia para clonación", "",
+            "Audio (*.wav *.mp3 *.flac)"
+        )
+        if path:
+            self._clone_ref_path = path
+            self.lbl_qwen_ref.setText(Path(path).name)
+            self.lbl_qwen_ref.setStyleSheet(f"color: {TEXT_PRIMARY};")
+
+    def _clear_clone_ref(self):
+        self._clone_ref_path = ""
+        self.lbl_qwen_ref.setText("Sin referencia (modo Custom/Design)")
+        self.lbl_qwen_ref.setStyleSheet(f"color: {TEXT_MUTED};")
+
+    def _preview_qwen_voice(self):
+        """Genera una frase de muestra con Qwen3-TTS local y la reproduce."""
+        model_id = self.combo_qwen_model.currentData()
+        speaker  = self.combo_qwen_speaker.currentText()
+        language = self.combo_qwen_lang.currentText()
+        instruct = self.txt_qwen_instruct.text().strip()
+        if not model_id:
+            set_status(self.status3, "⚠ Selecciona un modelo Qwen.", "err"); return
+
+        set_status(self.status3, "⏳ Generando muestra Qwen (primera vez descarga el modelo)…", "run")
+        self.btn_qwen_preview.setEnabled(False)
+
+        class _QwenPreviewThread(QThread):
+            done  = pyqtSignal(str)
+            error = pyqtSignal(str)
+            def __init__(self, model_id, speaker, language, instruct):
+                super().__init__()
+                self.model_id = model_id; self.speaker = speaker
+                self.language = language; self.instruct = instruct
+            def run(self):
+                try:
+                    import torch, soundfile as sf
+                    from qwen_tts import Qwen3TTSModel
+                    device = 'cuda:0' if torch.cuda.is_available() else 'cpu'
+                    dtype  = torch.bfloat16 if torch.cuda.is_available() else torch.float32
+                    model  = Qwen3TTSModel.from_pretrained(self.model_id, device_map=device, dtype=dtype)
+                    text   = ("El veloz murciélago hindú comía feliz cardillo y kiwi."
+                              if self.language in ('Spanish', 'Auto')
+                              else "The quick brown fox jumps over the lazy dog.")
+                    if 'VoiceDesign' in self.model_id:
+                        wavs, sr = model.generate_voice_design(text=text, language=self.language or 'Spanish', instruct=self.instruct or "warm storytelling voice")
+                    else:
+                        wavs, sr = model.generate_custom_voice(text=text, language=self.language or 'Spanish', speaker=self.speaker, instruct=self.instruct or None)
+                    tmp = tempfile.NamedTemporaryFile(suffix='.wav', delete=False)
+                    sf.write(tmp.name, wavs[0], sr)
+                    self.done.emit(tmp.name)
+                except ImportError:
+                    self.error.emit("pip install qwen-tts")
+                except Exception as e:
+                    self.error.emit(str(e))
+
+        self._qwen_preview_thread = _QwenPreviewThread(model_id, speaker, language, instruct)
+        self._qwen_preview_thread.done.connect(self._on_preview_done)
+        self._qwen_preview_thread.done.connect(lambda _: self.btn_qwen_preview.setEnabled(True))
+        self._qwen_preview_thread.error.connect(lambda e: (
+            set_status(self.status3, f"❌ {e}", "err"),
+            self.btn_qwen_preview.setEnabled(True)
+        ))
+        self._qwen_preview_thread.start()
+
     # ── FASE 2 ────────────────────────────────────────────────────────────────
     def _pick_output(self):
         folder = QFileDialog.getExistingDirectory(self, "Carpeta de salida MP3")
@@ -1894,48 +2487,97 @@ class AudiobookApp(QMainWindow):
             set_status(self.status3, "⚠ No hay archivos TXT.", "err"); return
         if not self.output_folder:
             set_status(self.status3, "⚠ Selecciona carpeta de salida.", "err"); return
-        voice_path = self.combo_voice.currentData()
-        if not voice_path or not os.path.exists(voice_path):
-            set_status(self.status3, "⚠ Modelo de voz no encontrado.", "err"); return
+
+        engine = self._current_engine()
+
+        # Validaciones por motor
+        if engine == 'piper':
+            voice_path = self.combo_voice.currentData()
+            if not voice_path or not os.path.exists(voice_path):
+                set_status(self.status3, "⚠ Modelo Piper no encontrado.", "err"); return
+        elif engine == 'qwen_api':
+            api_key = self.txt_api_key.text().strip()
+            if not api_key:
+                set_status(self.status3, "⚠ Introduce la clave API de DashScope.", "err"); return
 
         os.makedirs(self.output_folder, exist_ok=True)
         self.btn_generate.setEnabled(False); self.btn_stop.setEnabled(True)
         self.btn_open_folder.setEnabled(False)
         self.btn_export_m4b.hide(); self.prog_m4b.hide(); self.status_m4b.hide()
         self.prog_audio.setValue(0); self._reset_list_icons()
-        cover = self.cover_data or extraer_portada(self.epub_path)
 
-        self.audio_worker = AudioWorker(
-            [str(f) for f in self.txt_files],
-            self.output_folder,
-            voice_path,
-            self.slider_speed.value() / 100.0,
-            metadata={
-                'titulo': self.txt_titulo.text().strip(),
-                'autor':  self.txt_autor.text().strip(),
-                'anyo':   self.txt_anyo.text().strip(),
-                'cover':  cover,
-            },
-            normalize    = self.chk_normalize.isChecked(),
-            pausa_frase  = self.spin_pausa_frase.value(),
-            pausa_parrafo = self.spin_pausa_parrafo.value(),
-            resume       = self.chk_resume.isChecked(),
-        )
-        self.audio_worker.progress.connect(self.prog_audio.setValue)
-        self.audio_worker.file_started.connect(self._on_file_started)
-        self.audio_worker.file_done.connect(self._on_file_done)
-        self.audio_worker.skipped.connect(self._on_file_skipped)
-        self.audio_worker.eta_updated.connect(
-            lambda eta: set_status(self.status3, f"⏳ Generando…  {eta}", "run")
-        )
-        self.audio_worker.finished.connect(self._on_audio_finished)
-        self.audio_worker.error.connect(lambda e: set_status(self.status3, f"❌ {e}", "err"))
+        cover    = self.cover_data or extraer_portada(self.epub_path)
+        metadata = {
+            'titulo': self.txt_titulo.text().strip(),
+            'autor':  self.txt_autor.text().strip(),
+            'anyo':   self.txt_anyo.text().strip(),
+            'cover':  cover,
+        }
+        txt_list = [str(f) for f in self.txt_files]
+        speed    = self.slider_speed.value() / 100.0
+
+        def _connect(worker):
+            worker.progress.connect(self.prog_audio.setValue)
+            worker.file_started.connect(self._on_file_started)
+            worker.file_done.connect(self._on_file_done)
+            worker.skipped.connect(self._on_file_skipped)
+            worker.eta_updated.connect(
+                lambda eta: set_status(self.status3, f"⏳ Generando…  {eta}", "run")
+            )
+            worker.finished.connect(self._on_audio_finished)
+            worker.error.connect(lambda e: set_status(self.status3, f"❌ {e}", "err"))
+            if hasattr(worker, 'log'):
+                worker.log.connect(lambda m: set_status(self.status3, m, "run"))
+
+        if engine == 'piper':
+            self.audio_worker = AudioWorker(
+                txt_list, self.output_folder,
+                self.combo_voice.currentData(), speed,
+                metadata     = metadata,
+                normalize    = self.chk_normalize.isChecked(),
+                pausa_frase  = self.spin_pausa_frase.value(),
+                pausa_parrafo = self.spin_pausa_parrafo.value(),
+                resume       = self.chk_resume.isChecked(),
+            )
+
+        elif engine == 'qwen_local':
+            self.audio_worker = QwenLocalWorker(
+                txt_list, self.output_folder,
+                model_id      = self.combo_qwen_model.currentData(),
+                speaker       = self.combo_qwen_speaker.currentText(),
+                language      = self.combo_qwen_lang.currentText(),
+                instruct      = self.txt_qwen_instruct.text().strip(),
+                ref_audio     = self._clone_ref_path,
+                ref_text      = self.txt_qwen_ref_text.text().strip(),
+                speed         = speed,
+                normalize     = self.chk_normalize.isChecked(),
+                pausa_parrafo = self.spin_pausa_parrafo.value(),
+                resume        = self.chk_resume.isChecked(),
+                metadata      = metadata,
+            )
+
+        else:  # qwen_api
+            self.audio_worker = QwenAPIWorker(
+                txt_list, self.output_folder,
+                api_key       = self.txt_api_key.text().strip(),
+                model         = self.combo_api_model.currentText(),
+                voice         = self.combo_api_voice.currentText(),
+                language      = self.combo_api_lang.currentText(),
+                speed         = speed,
+                normalize     = self.chk_normalize.isChecked(),
+                pausa_parrafo = self.spin_pausa_parrafo.value(),
+                resume        = self.chk_resume.isChecked(),
+                metadata      = metadata,
+            )
+
+        _connect(self.audio_worker)
         self.audio_worker.start()
-        set_status(self.status3, "⏳ Generando audiolibro…", "run")
+        set_status(self.status3, f"⏳ Generando con {engine.replace('_', ' ')}…", "run")
         self._save_session()
 
     def _stop_audio(self):
-        if self.audio_worker: self.audio_worker.stop()
+        if self.audio_worker and hasattr(self.audio_worker, 'stop'):
+            self.audio_worker.stop()
         set_status(self.status3, "⏹ Detenido por el usuario.", "warn")
         self.btn_generate.setEnabled(True); self.btn_stop.setEnabled(False)
 

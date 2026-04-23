@@ -3,13 +3,30 @@ ebooklib>=0.18
 beautifulsoup4>=4.12.0
 lxml>=5.0.0
 mutagen>=1.47.0
-piper-tts>=1.2.0
-kokoro>=0.9.4
-mobi>=0.3.3
 soundfile>=0.12.1
 langdetect>=1.0.9
 pdfplumber>=0.11.0
 
-# Optional: OCR for scanned PDFs (requires tesseract binary)
+# ── Motor Piper (local, CPU) ───────────────────────────────────────────────────
+piper-tts>=1.2.0
+
+# ── Motor Qwen3-TTS (local, GPU) ──────────────────────────────────────────────
+# pip install qwen-tts
+# Requiere CUDA. Descarga el modelo (~3 GB) en el primer uso desde Hugging Face.
+# qwen-tts>=0.1.0
+
+# ── Motor Qwen3-TTS API (DashScope / Alibaba Cloud) ────────────────────────────
+# pip install dashscope requests
+# Requiere DASHSCOPE_API_KEY (https://dashscope.aliyun.com)
+# dashscope>=1.24.6
+# requests>=2.32.0
+
+# ── Motor Kokoro (alternativo) ─────────────────────────────────────────────────
+# kokoro>=0.9.4
+
+# ── Otros parsers de libro ────────────────────────────────────────────────────
+mobi>=0.3.3
+
+# ── OCR para PDF escaneados (opcional) ────────────────────────────────────────
 # pytesseract>=0.3.13
 # Pillow>=10.0.0
