@@ -37,6 +37,16 @@ import os
 os.environ.setdefault("HF_HUB_ENABLE_HF_TRANSFER", "1")   # protocolo xet más rápido
 os.environ.setdefault("HF_HUB_DISABLE_SYMLINKS_WARNING", "1")  # Windows no soporta symlinks
 
+# ── Añadir SoX al PATH si winget lo instaló pero el shell no se ha reiniciado ─
+import glob as _glob
+_winget_pkg_root = os.path.join(os.environ.get("LOCALAPPDATA", ""), "Microsoft", "WinGet", "Packages")
+# El paquete portable de winget descomprime en <pkg_name>/<inner_dir>/sox.exe
+for _pkg in _glob.glob(os.path.join(_winget_pkg_root, "ChrisBagwell.SoX*")):
+    for _inner in _glob.glob(os.path.join(_pkg, "sox*")):
+        if os.path.isdir(_inner) and os.path.isfile(os.path.join(_inner, "sox.exe")):
+            os.environ["PATH"] = _inner + os.pathsep + os.environ.get("PATH", "")
+del _glob, _winget_pkg_root
+
 import onnxruntime  # debe importarse ANTES de piper para evitar conflicto de DLL con onnxruntime-gpu
 import numpy as np
 import ebooklib
